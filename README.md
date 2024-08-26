@@ -1,8 +1,2 @@
-# ekilibri
+# Ekilibri
 
-## Request
-
-Data on request:
-
-- Shard key
-- Operation
