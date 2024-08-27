@@ -11,6 +11,8 @@ struct Config {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let config_content = fs::read_to_string("ekilibri.toml").await.unwrap();
     let config: Config = toml::from_str(&config_content).unwrap();
     println!("{:?}", config);
@@ -41,6 +43,9 @@ async fn main() {
                 server_stream.write_all(&buf).await.unwrap();
 
                 // Reply with same response
+                let mut buf = [0_u8; 1024];
+                server_stream.read(&mut buf).await.unwrap();
+                stream.write_all(&buf).await.unwrap();
             }
             Err(_) => eprintln!("Error listening to socket"),
         }
