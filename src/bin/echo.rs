@@ -20,7 +20,7 @@ async fn main() {
     let listener = match TcpListener::bind(format!("127.0.0.1:{port}")).await {
         Ok(listener) => listener,
         Err(e) => panic!(
-            "Unable to start ping pong server on port {port}. Error = {:?}",
+            "Unable to start echo server on port {port}. Error = {:?}",
             e
         ),
     };

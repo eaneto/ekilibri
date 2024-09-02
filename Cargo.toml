@@ -8,8 +8,8 @@ name = "ekilibri"
 path = "src/bin/server.rs"
 
 [[bin]]
-name = "ping-pong"
-path = "src/bin/pingpong.rs"
+name = "echo"
+path = "src/bin/echo.rs"
 
 [dependencies]
 tracing = "0.1"
