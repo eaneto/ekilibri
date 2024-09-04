@@ -32,7 +32,7 @@ async fn main() {
                     let request_id = Uuid::new_v4();
                     info!("Received message, request_id={request_id}");
                     let mut buf = [0_u8; 1024];
-                    stream.read(&mut buf).await.unwrap();
+                    let _ = stream.read(&mut buf).await.unwrap();
                     stream.write_all(&buf).await.unwrap();
                     info!("Replied message, request_id={request_id}");
                 });

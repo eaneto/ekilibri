@@ -5,8 +5,7 @@ use std::sync::{
 };
 use tokio::{
     fs,
-    io::AsyncReadExt,
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::RwLock,
 };
@@ -95,12 +94,13 @@ async fn main() {
 
 async fn process_request(
     request_id: Uuid,
-    ekilibri_stream: &mut TcpStream,
-    server_stream: &mut TcpStream,
+    mut ekilibri_stream: &mut TcpStream,
+    mut server_stream: &mut TcpStream,
 ) {
     // Read data from client and send it to the server
+    let mut buf_reader = BufReader::new(&mut ekilibri_stream);
     let mut buf = [0_u8; 1024];
-    match ekilibri_stream.read(&mut buf).await {
+    match buf_reader.read(&mut buf).await {
         Ok(size) => {
             trace!(
                 "Successfully read data from client stream, size={size}, request_id={request_id}"
@@ -122,8 +122,9 @@ async fn process_request(
     }
 
     // Reply client with same response from server
+    let mut buf_reader = BufReader::new(&mut server_stream);
     let mut buf = [0_u8; 1024];
-    match server_stream.read(&mut buf).await {
+    match buf_reader.read(&mut buf).await {
         Ok(size) => {
             trace!(
                 "Successfully read data from server stream, size={size}, request_id={request_id}"
