@@ -13,6 +13,8 @@ use tokio::{
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
+use clap::Parser;
+
 #[derive(Debug, Deserialize, Clone)]
 enum Strategies {
     RoundRobin,
@@ -25,20 +27,26 @@ struct Config {
     strategy: Strategies,
 }
 
+#[derive(Parser, Debug)]
+struct Args {
+    /// Path to configuration file
+    #[arg(short, long, default_value = "ekilibri.toml")]
+    file: String,
+}
+
 #[tokio::main]
 async fn main() {
     // TODO: Health checks
     tracing_subscriber::fmt::init();
 
-    // TODO: Make file path configurable
-    let configuration_file = "ekilibri.toml";
-    let config_content = match fs::read_to_string(&configuration_file).await {
+    let args = Args::parse();
+    let config_content = match fs::read_to_string(&args.file).await {
         Ok(content) => content,
-        Err(e) => panic!("Unable to read {configuration_file} configuration file. {e}"),
+        Err(e) => panic!("Unable to read {} configuration file. {e}", args.file),
     };
     let config: Config = match toml::from_str(&config_content) {
         Ok(config) => config,
-        Err(e) => panic!("Unable to parse configuration file {configuration_file}. {e}"),
+        Err(e) => panic!("Unable to parse configuration file {}. {e}", args.file),
     };
     debug!("Starting ekilibri with {:?}", config);
 
@@ -54,42 +62,54 @@ async fn main() {
 
     info!("Ekilibri listening at port 8080");
 
-    loop {
-        match listener.accept().await {
-            Ok((mut ekilibri_stream, _)) => {
-                let connections_counters = Arc::clone(&connections_counters);
-                let config = config.clone();
-                tokio::spawn(async move {
-                    let request_id = Uuid::new_v4();
-                    let server_id = match config.strategy {
-                        Strategies::RoundRobin => choose_server_round_robin(&config),
-                        Strategies::LeastConnections => {
-                            choose_server_least_connections(
-                                &config,
-                                Arc::clone(&connections_counters),
-                            )
-                            .await
-                        }
-                    };
+    accept_and_handle_connections(listener, connections_counters, config).await;
+}
 
-                    let counters = connections_counters.read().await;
-                    let counter = counters.get(server_id).unwrap();
-                    counter.fetch_add(1, Ordering::Relaxed);
+async fn accept_and_handle_connections(
+    listener: TcpListener,
+    connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
+    config: Config,
+) {
+    match listener.accept().await {
+        Ok((mut ekilibri_stream, _)) => {
+            let connections_counters = Arc::clone(&connections_counters);
+            let config = config.clone();
+            tokio::spawn(async move {
+                handle_connection(config, connections_counters, &mut ekilibri_stream).await;
+            });
+        }
+        Err(e) => warn!("Error listening to socket. {e}"),
+    }
+}
 
-                    match TcpStream::connect(config.servers.get(server_id).unwrap()).await {
-                        Ok(mut server_stream) => {
-                            info!("Connected to server, server_id={server_id}, request_id={request_id}");
-                            process_request(request_id, &mut ekilibri_stream, &mut server_stream).await;
-                        }
-                        Err(e) => warn!("Can't connect to server, server_id={server_id}, request_id={request_id}. {e}"),
-                    }
+async fn handle_connection(
+    config: Config,
+    connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
+    ekilibri_stream: &mut TcpStream,
+) {
+    let request_id = Uuid::new_v4();
+    let server_id = match config.strategy {
+        Strategies::RoundRobin => choose_server_round_robin(&config),
+        Strategies::LeastConnections => {
+            choose_server_least_connections(&config, Arc::clone(&connections_counters)).await
+        }
+    };
 
-                    counter.fetch_sub(1, Ordering::Relaxed);
-                });
-            }
-            Err(e) => warn!("Error listening to socket. {e}"),
+    let counters = connections_counters.read().await;
+    let counter = counters.get(server_id).unwrap();
+    counter.fetch_add(1, Ordering::Relaxed);
+
+    match TcpStream::connect(config.servers.get(server_id).unwrap()).await {
+        Ok(mut server_stream) => {
+            info!("Connected to server, server_id={server_id}, request_id={request_id}");
+            process_request(request_id, ekilibri_stream, &mut server_stream).await;
+        }
+        Err(e) => {
+            warn!("Can't connect to server, server_id={server_id}, request_id={request_id}. {e}")
         }
     }
+
+    counter.fetch_sub(1, Ordering::Relaxed);
 }
 
 async fn process_request(
