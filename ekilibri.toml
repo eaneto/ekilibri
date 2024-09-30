@@ -4,3 +4,5 @@ servers = [
     "127.0.0.1:8083"
 ]
 strategy = "LeastConnections"
+max_fails = 5
+fail_timeout = 1

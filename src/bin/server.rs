@@ -1,7 +1,10 @@
 use serde::Deserialize;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 use tokio::{
     fs,
@@ -34,9 +37,10 @@ struct Args {
     file: String,
 }
 
+type Servers = Arc<RwLock<Vec<String>>>;
+
 #[tokio::main]
 async fn main() {
-    // TODO: Health checks
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
@@ -62,20 +66,42 @@ async fn main() {
 
     info!("Ekilibri listening at port 8080");
 
-    accept_and_handle_connections(listener, connections_counters, config).await;
+    let servers = Servers::new(RwLock::new(config.servers.clone()));
+
+    let servers_clone = servers.clone();
+    tokio::spawn(async move {
+        let servers = servers_clone.read().await;
+        info!("Initiating health checks {:?}", servers);
+        loop {
+            for server in servers.iter() {
+                // TODO: call health
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+
+    accept_and_handle_connections(listener, connections_counters, config, servers).await;
 }
 
 async fn accept_and_handle_connections(
     listener: TcpListener,
     connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
     config: Config,
+    servers: Servers,
 ) {
     match listener.accept().await {
         Ok((mut ekilibri_stream, _)) => {
             let connections_counters = Arc::clone(&connections_counters);
             let config = config.clone();
             tokio::spawn(async move {
-                handle_connection(config, connections_counters, &mut ekilibri_stream).await;
+                handle_connection(
+                    config,
+                    servers.clone(),
+                    connections_counters,
+                    &mut ekilibri_stream,
+                )
+                .await;
             });
         }
         Err(e) => warn!("Error listening to socket. {e}"),
@@ -84,22 +110,31 @@ async fn accept_and_handle_connections(
 
 async fn handle_connection(
     config: Config,
+    servers: Servers,
     connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
     ekilibri_stream: &mut TcpStream,
 ) {
     let request_id = Uuid::new_v4();
     let server_id = match config.strategy {
-        Strategies::RoundRobin => choose_server_round_robin(&config),
+        Strategies::RoundRobin => choose_server_round_robin(servers).await,
         Strategies::LeastConnections => {
-            choose_server_least_connections(&config, Arc::clone(&connections_counters)).await
+            choose_server_least_connections(servers, Arc::clone(&connections_counters)).await
         }
     };
 
     let counters = connections_counters.read().await;
-    let counter = counters.get(server_id).unwrap();
+    let counter = counters
+        .get(server_id)
+        .expect("The counters should be initialized with every possible server_id at this point");
     counter.fetch_add(1, Ordering::Relaxed);
 
-    match TcpStream::connect(config.servers.get(server_id).unwrap()).await {
+    match TcpStream::connect(
+        config.servers.get(server_id).expect(
+            "The counters should be initialized with every possible server_id at this point",
+        ),
+    )
+    .await
+    {
         Ok(mut server_stream) => {
             info!("Connected to server, server_id={server_id}, request_id={request_id}");
             process_request(request_id, ekilibri_stream, &mut server_stream).await;
@@ -165,20 +200,29 @@ async fn process_request(
     }
 }
 
-fn choose_server_round_robin(config: &Config) -> usize {
-    rand::random::<usize>() % config.servers.len()
+async fn choose_server_round_robin(servers: Servers) -> usize {
+    rand::random::<usize>() % servers.read().await.len()
 }
 
 async fn choose_server_least_connections(
-    config: &Config,
+    servers: Servers,
     connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
 ) -> usize {
     let mut chosen_server = 0;
     let counters = connections_counters.read().await;
-    for server_id in 1..config.servers.len() {
-        let chosen_server_connections =
-            counters.get(chosen_server).unwrap().load(Ordering::Relaxed);
-        let current_server_connections = counters.get(server_id).unwrap().load(Ordering::Relaxed);
+    for server_id in 1..servers.read().await.len() {
+        let chosen_server_connections = counters
+            .get(chosen_server)
+            .expect(
+                "The counters should be initialized with every possible server_id at this point",
+            )
+            .load(Ordering::Relaxed);
+        let current_server_connections = counters
+            .get(server_id)
+            .expect(
+                "The counters should be initialized with every possible server_id at this point",
+            )
+            .load(Ordering::Relaxed);
         if chosen_server_connections > current_server_connections {
             chosen_server = server_id;
         }
