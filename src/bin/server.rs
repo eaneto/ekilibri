@@ -136,8 +136,10 @@ async fn handle_connection(
     .await
     {
         Ok(mut server_stream) => {
-            info!("Connected to server, server_id={server_id}, request_id={request_id}");
-            process_request(request_id, ekilibri_stream, &mut server_stream).await;
+            if server_stream.set_nodelay(true).is_ok() {
+                info!("Connected to server, server_id={server_id}, request_id={request_id}");
+                process_request(request_id, ekilibri_stream, &mut server_stream).await;
+            }
         }
         Err(e) => {
             warn!("Can't connect to server, server_id={server_id}, request_id={request_id}. {e}")

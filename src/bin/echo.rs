@@ -1,7 +1,13 @@
-use clap::Parser;
-use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpListener};
+use std::time::Duration;
 
-use tracing::info;
+use clap::Parser;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
+    time,
+};
+
+use tracing::{debug, info};
 
 use uuid::Uuid;
 
@@ -31,10 +37,30 @@ async fn main() {
                 tokio::spawn(async move {
                     let request_id = Uuid::new_v4();
                     info!("Received message, request_id={request_id}");
-                    let mut buf = [0_u8; 1024];
-                    let _ = stream.read(&mut buf).await.unwrap();
-                    stream.write_all(&buf).await.unwrap();
-                    info!("Replied message, request_id={request_id}");
+
+                    let buf_reader = BufReader::new(&mut stream);
+                    let mut request_lines = buf_reader.lines();
+                    if let Ok(line) = request_lines.next_line().await {
+                        let line = line.expect("Line should be some at this point");
+                        debug!("line={}", line);
+                        match &line[..] {
+                            "POST /echo HTTP/1.1" => {
+                                // TODO: Format corret response
+                                stream
+                                    .write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())
+                                    .await
+                                    .unwrap();
+                                info!("Replied message, request_id={request_id}");
+                            }
+                            "GET /sleep HTTP/1.1" => {
+                                time::sleep(Duration::from_millis(2000)).await;
+                                let response = "HTTP/1.1 200 OK\r\n\r\n";
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                                info!("Replied message, request_id={request_id}");
+                            }
+                            _ => debug!("Nothing"),
+                        }
+                    }
                 });
             }
             Err(_) => eprintln!("Error listening to socket"),
