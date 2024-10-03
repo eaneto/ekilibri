@@ -45,9 +45,24 @@ async fn main() {
                         debug!("line={}", line);
                         match &line[..] {
                             "POST /echo HTTP/1.1" => {
-                                // TODO: Format corret response
+                                let mut response_body = String::new();
+                                response_body.push_str(&line);
+                                while let Ok(new_line) = request_lines.next_line().await {
+                                    match new_line {
+                                        Some(content) => {
+                                            debug!("content={content}");
+                                            response_body.push_str(&content)
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                let content_length = response_body.len();
                                 stream
-                                    .write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())
+                                    .write_all(
+                                        format!(
+                                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {content_length}\r\n{response_body}\r\n\r\n")
+                                            .as_bytes(),
+                                    )
                                     .await
                                     .unwrap();
                                 info!("Replied message, request_id={request_id}");
