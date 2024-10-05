@@ -44,7 +44,7 @@ async fn main() {
                     let CR = '\r';
                     let LF = '\n';
 
-                    // TODO:
+                    // TODO: https://www.rfc-editor.org/rfc/rfc2616#section-2
                     // First line: VERB PATH PROTOCOL
                     // Second line: Headers
                     // Other line: Body
