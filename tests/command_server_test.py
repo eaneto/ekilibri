@@ -7,7 +7,7 @@ def test_echo_server():
     headers = {"Content-Length": str(len(payload))}
 
     response = requests.post(
-        "http://localhost:8083/echo", headers=headers, data=payload
+        "http://localhost:8081/echo", headers=headers, data=payload
     )
 
     assert response.status_code == 200
@@ -22,7 +22,7 @@ def test_echo_server_with_content_type():
     headers = {"Content-Length": str(len(payload)), "Content-Type": "application/json"}
 
     response = requests.post(
-        "http://localhost:8083/echo", headers=headers, data=payload
+        "http://localhost:8081/echo", headers=headers, data=payload
     )
 
     assert response.status_code == 200
@@ -37,7 +37,7 @@ def test_echo_server_with_big_body():
     headers = {"Content-Length": str(len(payload))}
 
     response = requests.post(
-        "http://localhost:8083/echo", headers=headers, data=payload
+        "http://localhost:8081/echo", headers=headers, data=payload
     )
 
     assert response.status_code == 200
@@ -52,7 +52,7 @@ def test_echo_server_with_huge_body():
     headers = {"Content-Length": str(len(payload))}
 
     response = requests.post(
-        "http://localhost:8083/echo", headers=headers, data=payload
+        "http://localhost:8081/echo", headers=headers, data=payload
     )
 
     assert response.status_code == 200
@@ -62,12 +62,12 @@ def test_echo_server_with_huge_body():
 
 
 def test_get_not_found():
-    response = requests.get("http://localhost:8083/not-found")
+    response = requests.get("http://localhost:8081/not-found")
     assert response.status_code == 404
     assert response.text == ""
 
 
 def test_post_not_found():
-    response = requests.post("http://localhost:8083/not-found", data="data")
+    response = requests.post("http://localhost:8081/not-found", data="data")
     assert response.status_code == 404
     assert response.text == ""

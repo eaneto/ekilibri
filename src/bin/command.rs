@@ -51,6 +51,11 @@ async fn main() {
                                 let response = "HTTP/1.1 200\r\n\r\n";
                                 stream.write_all(response.as_bytes()).await.unwrap();
                             }
+                            "/health" => {
+                                debug!("Received request for /health");
+                                let response = "HTTP/1.1 200\r\n\r\n";
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                            }
                             _ => {
                                 debug!("Received request for unmapped path");
                                 let response = "HTTP/1.1 404\r\n\r\n";
