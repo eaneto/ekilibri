@@ -16,6 +16,21 @@ def test_echo_server():
     assert response.text == payload
 
 
+def test_echo_server_with_content_type():
+    payload = """{"key": "value"}"""
+
+    headers = {"Content-Length": str(len(payload)), "Content-Type": "application/json"}
+
+    response = requests.post(
+        "http://localhost:8083/echo", headers=headers, data=payload
+    )
+
+    assert response.status_code == 200
+    assert response.headers["Content-Length"] == str(len(payload))
+    assert response.headers["Content-Type"] == "application/json"
+    assert response.text == payload
+
+
 def test_echo_server_with_big_body():
     payload = "test parsing this info" * 1000
 
