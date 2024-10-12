@@ -8,10 +8,15 @@ class EkilibriClient:
         self.__socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.__socket.connect((self.HOST, port))
 
-    def send_and_receive(self, message: str):
+    def send_and_receive(self, message: str, buffer_size: int):
         request_line = "POST /echo HTTP/1.1\r\n"
         header = "Content-Length: {}\r\n".format(len(message))
         self.__socket.send(
             "{}{}{}".format(request_line, header, message).encode("utf-8")
         )
+        return self.__socket.recv(buffer_size)
+
+    def send_and_receive_http(self):
+        request_line = "GET /blabla HTTP/1.1\r\n"
+        self.__socket.send(request_line.encode("utf-8"))
         return self.__socket.recv(1024)

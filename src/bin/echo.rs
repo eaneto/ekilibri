@@ -2,9 +2,9 @@ use std::{collections::HashMap, time::Duration};
 
 use clap::Parser;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    stream, time,
+    time,
 };
 
 use tracing::{debug, info};
@@ -41,51 +41,50 @@ async fn main() {
                     let request_id = Uuid::new_v4();
                     info!("Received message, request_id={request_id}");
 
-                    parse_request(&request_id, stream).await;
+                    let request = parse_request(&request_id, &mut stream).await;
 
-                    //let buf_reader = BufReader::new(&mut stream);
-                    //let mut request_lines = buf_reader.lines();
-                    //if let Ok(line) = request_lines.next_line().await {
-                    //    let line = line.unwrap();
-                    //    match &line[..] {
-                    //        "POST /echo HTTP/1.1" => {
-                    //            // TODO: parse headers
-                    //            // TODO: parse request body -> CRLF + CRLF
-                    //            let mut response_body = String::new();
-
-                    //            // TODO: Read content-type
-                    //            // TODO: Skip headers, read only the request body.
-                    //            while let Ok(new_line) = request_lines.next_line().await {
-                    //                match new_line {
-                    //                    Some(content) => {
-                    //                        debug!("content={content}");
-                    //                        response_body.push_str(&content)
-                    //                    }
-                    //                    None => break,
-                    //                }
-                    //            }
-
-                    //            debug!("Read the entire request, response={response_body}");
-                    //            let content_length = response_body.len();
-                    //            stream
-                    //                .write_all(
-                    //                    format!(
-                    //                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {content_length}\r\n\r\n{response_body}\r\n\r\n")
-                    //                        .as_bytes(),
-                    //                )
-                    //                .await
-                    //                .unwrap();
-                    //            info!("Replied message, request_id={request_id}");
-                    //        }
-                    //        "GET /sleep HTTP/1.1" => {
-                    //            time::sleep(Duration::from_millis(2000)).await;
-                    //            let response = "HTTP/1.1 200 OK\r\n\r\n";
-                    //            stream.write_all(response.as_bytes()).await.unwrap();
-                    //            info!("Replied message, request_id={request_id}");
-                    //        }
-                    //        _ => debug!("Nothing"),
-                    //    }
-                    //}
+                    match request.method {
+                        Method::Get => match request.path.as_str() {
+                            "/sleep" => {
+                                debug!("Received request for /sleep");
+                                time::sleep(Duration::from_millis(2000)).await;
+                                let response = "HTTP/1.1 200\r\n\r\n";
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                            }
+                            _ => {
+                                debug!("Received request for unmapped path");
+                                let response = "HTTP/1.1 404\r\n\r\n";
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                            }
+                        },
+                        Method::Post => match request.path.as_str() {
+                            "/echo" => {
+                                let length = match request.headers.get("Content-Length") {
+                                    Some(value) => value,
+                                    None => "0",
+                                };
+                                let content_length = format!("Content-Length: {length}");
+                                let content_type = match request.headers.get("Content-Type") {
+                                    Some(value) => value,
+                                    None => "text/plain",
+                                };
+                                let content_type = format!("Content-Type: {content_type}");
+                                let body = request.body.unwrap_or_default();
+                                let response = format!("HTTP/1.1 200\r\n{content_length}\r\n{content_type}\r\n\r\n{body}");
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                            }
+                            _ => {
+                                debug!("Received request for unmapped path");
+                                let response = "HTTP/1.1 404\r\n\r\n";
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                            }
+                        },
+                        Method::Unknown => {
+                            debug!("Received request for unknown method");
+                            let response = "HTTP/1.1 404\r\n";
+                            stream.write_all(response.as_bytes()).await.unwrap();
+                        }
+                    }
                 });
             }
             Err(_) => eprintln!("Error listening to socket"),
@@ -93,7 +92,20 @@ async fn main() {
     }
 }
 
-async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
+enum Method {
+    Get,
+    Post,
+    Unknown,
+}
+
+struct Request {
+    method: Method,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+}
+
+async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Request {
     let mut method = String::new();
     let mut path = String::new();
     let mut protocol = String::new();
@@ -142,14 +154,6 @@ async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
     let mut header_position = initial_position;
     for i in initial_position..(buf.len() - 3) {
         if buf[i] == CR && buf[i + 1] == LF {
-            // This means \r\n\r\n, which is the end of the headers
-            // and the beginning of the body(or the end of the
-            // request).
-            if buf[i + 2] == CR && buf[i + 3] == LF {
-                initial_position = i + 4;
-                break;
-            }
-
             // Parse header line
             let header_line = String::from_utf8_lossy(&buf[header_position..i]);
             let mut header_line = header_line.split(":");
@@ -161,6 +165,14 @@ async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
                 .to_string();
             headers.insert(key, value);
             header_position = i + 2;
+
+            // This means \r\n\r\n, which is the end of the headers
+            // and the beginning of the body(or the end of the
+            // request).
+            if buf[i + 2] == CR && buf[i + 3] == LF {
+                initial_position = i + 4;
+                break;
+            }
         }
     }
 
@@ -177,6 +189,7 @@ async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
 
     // content-length should be required if method is post:
     if method == "POST" {
+        // FIXME: lowercase headers keys
         let content_length = headers
             .get("Content-Length")
             .expect("Content length should have been sent in the request");
@@ -223,10 +236,16 @@ async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
         body = Some(String::from_utf8_lossy(&buf[initial_position..]).to_string());
     }
 
-    if let Some(content) = body {
-        debug!(
-            "Yup, there's a body, here it is: {content}, length={}",
-            content.len()
-        );
+    let method = match method.as_str() {
+        "GET" => Method::Get,
+        "POST" => Method::Post,
+        _ => Method::Unknown,
+    };
+
+    Request {
+        method,
+        path,
+        headers,
+        body,
     }
 }
