@@ -36,64 +36,74 @@ async fn main() {
     };
 
     loop {
-        match listener.accept().await {
-            Ok((mut stream, _)) => {
-                tokio::spawn(async move {
-                    let request_id = Uuid::new_v4();
-                    info!("Received message, request_id={request_id}");
+        accept_and_handle_connection(&listener).await;
+    }
+}
 
-                    let request = parse_request(&request_id, &mut stream).await;
+async fn accept_and_handle_connection(listener: &TcpListener) {
+    match listener.accept().await {
+        Ok((stream, _)) => {
+            tokio::spawn(async move {
+                process_request(stream).await;
+            });
+        }
+        Err(_) => eprintln!("Error listening to socket"),
+    }
+}
 
-                    match request.method {
-                        Method::Get => match request.path.as_str() {
-                            "/sleep" => {
-                                debug!("Received request for /sleep");
-                                time::sleep(Duration::from_millis(2000)).await;
-                                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
-                                stream.write_all(response.as_bytes()).await.unwrap();
-                            }
-                            "/health" => {
-                                debug!("Received request for /health");
-                                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
-                                stream.write_all(response.as_bytes()).await.unwrap();
-                            }
-                            _ => {
-                                debug!("Received request for unmapped path");
-                                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
-                                stream.write_all(response.as_bytes()).await.unwrap();
-                            }
-                        },
-                        Method::Post => match request.path.as_str() {
-                            "/echo" => {
-                                let length = match request.headers.get("Content-Length") {
-                                    Some(value) => value,
-                                    None => "0",
-                                };
-                                let content_length = format!("Content-Length: {length}");
-                                let content_type = match request.headers.get("Content-Type") {
-                                    Some(value) => value,
-                                    None => "text/plain",
-                                };
-                                let content_type = format!("Content-Type: {content_type}");
-                                let body = request.body.unwrap_or_default();
-                                let response = format!("HTTP/1.1 200{CRLF}{content_length}{CRLF}{content_type}{CRLF}{CRLF}{body}");
-                                stream.write_all(response.as_bytes()).await.unwrap();
-                            }
-                            _ => {
-                                debug!("Received request for unmapped path");
-                                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
-                                stream.write_all(response.as_bytes()).await.unwrap();
-                            }
-                        },
-                        Method::Unknown => {
-                            debug!("Received request for unknown method");
-                            let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
-                            stream.write_all(response.as_bytes()).await.unwrap();
-                        }
-                    }
-                });
+async fn process_request(mut stream: TcpStream) {
+    let request_id = Uuid::new_v4();
+    info!("Received message, request_id={request_id}");
+
+    let request = parse_request(&request_id, &mut stream).await;
+
+    match request.method {
+        Method::Get => match request.path.as_str() {
+            "/sleep" => {
+                debug!("Received request for /sleep");
+                time::sleep(Duration::from_millis(2000)).await;
+                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
+                stream.write_all(response.as_bytes()).await.unwrap();
             }
-            Err(_) => eprintln!("Error listening to socket"),
+            "/health" => {
+                debug!("Received request for /health");
+                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            _ => {
+                debug!("Received request for unmapped path");
+                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        },
+        Method::Post => match request.path.as_str() {
+            "/echo" => {
+                let length = match request.headers.get("Content-Length") {
+                    Some(value) => value,
+                    None => "0",
+                };
+                let content_length = format!("Content-Length: {length}");
+                let content_type = match request.headers.get("Content-Type") {
+                    Some(value) => value,
+                    None => "text/plain",
+                };
+                let content_type = format!("Content-Type: {content_type}");
+                let body = request.body.unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 200{CRLF}{content_length}{CRLF}{content_type}{CRLF}{CRLF}{body}"
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            _ => {
+                debug!("Received request for unmapped path");
+                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        },
+        Method::Unknown => {
+            debug!("Received request for unknown method");
+            let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
+            stream.write_all(response.as_bytes()).await.unwrap();
         }
     }
 }
