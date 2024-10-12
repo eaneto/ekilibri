@@ -1,3 +1,8 @@
+import io
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+import pytest
 import requests
 
 
@@ -29,6 +34,21 @@ def test_echo_server_with_content_type():
     assert response.headers["Content-Length"] == str(len(payload))
     assert response.headers["Content-Type"] == "application/json"
     assert response.text == payload
+
+
+def test_echo_server_without_content_type():
+    payload = """{"key": "value"}"""
+
+    headers = {"Content-Type": "application/json"}
+
+    url = "http://localhost:8081/echo"
+    data = io.BytesIO(payload.encode("utf-8"))
+
+    request = Request(url, data=data, headers=headers)
+    with pytest.raises(HTTPError) as error:
+        urlopen(request)
+
+    assert "411" in str(error)
 
 
 def test_echo_server_with_big_body():

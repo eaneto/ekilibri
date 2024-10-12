@@ -55,7 +55,18 @@ async fn process_request(mut stream: TcpStream) {
     let request_id = Uuid::new_v4();
     info!("Received message, request_id={request_id}");
 
-    let request = parse_request(&request_id, &mut stream).await;
+    let request = match parse_request(&request_id, &mut stream).await {
+        Ok(request) => request,
+        Err(e) => {
+            let status = match e {
+                ParseErrorKind::MissingContentLength => "411",
+                _ => "400",
+            };
+            let response = format!("HTTP/1.1 {status}{CRLF}{CRLF}");
+            stream.write_all(response.as_bytes()).await.unwrap();
+            return;
+        }
+    };
 
     match request.method {
         Method::Get => match request.path.as_str() {
@@ -121,7 +132,18 @@ struct Request {
     body: Option<String>,
 }
 
-async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Request {
+enum ParseErrorKind {
+    UnableToRead,
+    MalformedRequest,
+    MalformedHeader,
+    MissingContentLength,
+    InvalidContentLength,
+}
+
+async fn parse_request(
+    request_id: &uuid::Uuid,
+    stream: &mut TcpStream,
+) -> Result<Request, ParseErrorKind> {
     let mut method = String::new();
     let mut path = String::new();
     let mut protocol = String::new();
@@ -138,7 +160,7 @@ async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Reque
     };
 
     if bytes_read == 0 {
-        panic!("HELP");
+        return Err(ParseErrorKind::UnableToRead);
     }
 
     debug!("{}", String::from_utf8_lossy(&buf));
@@ -149,15 +171,18 @@ async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Reque
         if buf[i] == CR && buf[i + 1] == LF {
             let request_line = String::from_utf8_lossy(&buf[initial_position..i]);
             let mut request_line = request_line.split_whitespace();
-            method = request_line
-                .next()
-                .expect("Where's the method?")
-                .to_string();
-            path = request_line.next().expect("Where's the path?").to_string();
-            protocol = request_line
-                .next()
-                .expect("Where's the protocol?")
-                .to_string();
+            method = match request_line.next() {
+                Some(method) => method.to_string(),
+                None => return Err(ParseErrorKind::MalformedRequest),
+            };
+            path = match request_line.next() {
+                Some(path) => path.to_string(),
+                None => return Err(ParseErrorKind::MalformedRequest),
+            };
+            protocol = match request_line.next() {
+                Some(protocol) => protocol.to_string(),
+                None => return Err(ParseErrorKind::MalformedRequest),
+            };
             initial_position = i + 2;
             break;
         }
@@ -173,12 +198,14 @@ async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Reque
             // Parse header line
             let header_line = String::from_utf8_lossy(&buf[header_position..i]);
             let mut header_line = header_line.split(":");
-            let key = header_line.next().expect("Header key missing").to_string();
-            let value = header_line
-                .next()
-                .expect("Header value missing")
-                .trim_start()
-                .to_string();
+            let key = match header_line.next() {
+                Some(key) => key.to_string(),
+                None => return Err(ParseErrorKind::MalformedHeader),
+            };
+            let value = match header_line.next() {
+                Some(value) => value.trim_start().to_string(),
+                None => return Err(ParseErrorKind::MalformedHeader),
+            };
             headers.insert(key, value);
             header_position = i + 2;
 
@@ -206,13 +233,15 @@ async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Reque
     // content-length should be required if method is post:
     if method == "POST" {
         // FIXME: lowercase headers keys
-        let content_length = headers
-            .get("Content-Length")
-            .expect("Content length should have been sent in the request");
+        let content_length = match headers.get("Content-Length") {
+            Some(length) => length,
+            None => return Err(ParseErrorKind::MissingContentLength),
+        };
 
-        let content_length = content_length
-            .parse::<u32>()
-            .expect("Content length should fit in a u32");
+        let content_length = match content_length.parse::<u32>() {
+            Ok(length) => length,
+            Err(_) => return Err(ParseErrorKind::InvalidContentLength),
+        };
 
         if bytes_read - initial_position >= content_length as usize {
             debug!("I have read enough from the socket!");
@@ -258,10 +287,10 @@ async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Reque
         _ => Method::Unknown,
     };
 
-    Request {
+    Ok(Request {
         method,
         path,
         headers,
         body,
-    }
+    })
 }
