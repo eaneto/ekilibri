@@ -17,6 +17,7 @@ struct Args {
     port: u32,
 }
 
+const CRLF: &str = "\r\n";
 const CR: u8 = 13;
 const LF: u8 = 10;
 
@@ -48,17 +49,17 @@ async fn main() {
                             "/sleep" => {
                                 debug!("Received request for /sleep");
                                 time::sleep(Duration::from_millis(2000)).await;
-                                let response = "HTTP/1.1 200\r\n\r\n";
+                                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
                                 stream.write_all(response.as_bytes()).await.unwrap();
                             }
                             "/health" => {
                                 debug!("Received request for /health");
-                                let response = "HTTP/1.1 200\r\n\r\n";
+                                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
                                 stream.write_all(response.as_bytes()).await.unwrap();
                             }
                             _ => {
                                 debug!("Received request for unmapped path");
-                                let response = "HTTP/1.1 404\r\n\r\n";
+                                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
                                 stream.write_all(response.as_bytes()).await.unwrap();
                             }
                         },
@@ -75,18 +76,18 @@ async fn main() {
                                 };
                                 let content_type = format!("Content-Type: {content_type}");
                                 let body = request.body.unwrap_or_default();
-                                let response = format!("HTTP/1.1 200\r\n{content_length}\r\n{content_type}\r\n\r\n{body}");
+                                let response = format!("HTTP/1.1 200{CRLF}{content_length}{CRLF}{content_type}{CRLF}{CRLF}{body}");
                                 stream.write_all(response.as_bytes()).await.unwrap();
                             }
                             _ => {
                                 debug!("Received request for unmapped path");
-                                let response = "HTTP/1.1 404\r\n\r\n";
+                                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
                                 stream.write_all(response.as_bytes()).await.unwrap();
                             }
                         },
                         Method::Unknown => {
                             debug!("Received request for unknown method");
-                            let response = "HTTP/1.1 404\r\n";
+                            let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
                             stream.write_all(response.as_bytes()).await.unwrap();
                         }
                     }
@@ -200,8 +201,8 @@ async fn parse_request(request_id: &uuid::Uuid, stream: &mut TcpStream) -> Reque
             .expect("Content length should have been sent in the request");
 
         let content_length = content_length
-            .parse::<u16>()
-            .expect("Content length should fit in a u16");
+            .parse::<u32>()
+            .expect("Content length should fit in a u32");
 
         if bytes_read - initial_position >= content_length as usize {
             debug!("I have read enough from the socket!");
