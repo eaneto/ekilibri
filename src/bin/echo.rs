@@ -17,6 +17,9 @@ struct Args {
     port: u32,
 }
 
+const CR: u8 = 13;
+const LF: u8 = 10;
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -91,24 +94,14 @@ async fn main() {
 }
 
 async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
-    // TODO: https://www.rfc-editor.org/rfc/rfc2616#section-2
-    //
-    // First line: METHOD PATH PROTOCOL
-    //
-    // Second line: Headers
-    //
-    // Other line: Body
-
     let mut method = String::new();
     let mut path = String::new();
     let mut protocol = String::new();
     let mut headers = HashMap::<String, String>::new();
-    let mut _body = String::new();
+    let mut body: Option<String> = None;
 
-    let cursor = 0;
     let mut buf = vec![0u8; 4096];
-
-    let bytes_read = match stream.read(&mut buf[cursor..]).await {
+    let bytes_read = match stream.read(&mut buf).await {
         Ok(size) => size,
         Err(e) => {
             debug!("Error reading TCP stream to parse command, request_id={request_id}, error={e}");
@@ -121,9 +114,6 @@ async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
     }
 
     debug!("{}", String::from_utf8_lossy(&buf));
-
-    const CR: u8 = 13;
-    const LF: u8 = 10;
 
     // Parse request line
     let mut initial_position = 0;
@@ -200,5 +190,43 @@ async fn parse_request(request_id: &uuid::Uuid, mut stream: TcpStream) {
         } else {
             debug!("I need to read more from the socket!");
         }
+
+        let mut cursor = bytes_read;
+        let mut bytes_read = bytes_read;
+        while bytes_read - initial_position < content_length as usize {
+            debug!("Reading more data from the socket");
+            if buf.len() == cursor {
+                buf.resize(cursor * 2, 0);
+            }
+
+            // FIXME: I think there might be a bug here, in case
+            // there's an error, or there's nothing to read from the
+            // socket.
+            let current_bytes_read = match stream.read(&mut buf[cursor..]).await {
+                Ok(size) => size,
+                Err(e) => {
+                    debug!("Error reading TCP stream to parse command, request_id={request_id}, error={e}");
+                    0
+                }
+            };
+
+            if bytes_read == 0 {
+                panic!("HELP");
+            }
+
+            cursor += current_bytes_read;
+            bytes_read += current_bytes_read;
+        }
+
+        debug!("I read everything that i needed, ready to parse request body.");
+
+        body = Some(String::from_utf8_lossy(&buf[initial_position..]).to_string());
+    }
+
+    if let Some(content) = body {
+        debug!(
+            "Yup, there's a body, here it is: {content}, length={}",
+            content.len()
+        );
     }
 }
