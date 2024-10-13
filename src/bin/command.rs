@@ -63,28 +63,27 @@ async fn process_request(mut stream: TcpStream) {
                 _ => "400",
             };
             let response = format!("HTTP/1.1 {status}{CRLF}{CRLF}");
-            stream.write_all(response.as_bytes()).await.unwrap();
+            if let Err(e) = stream.write_all(response.as_bytes()).await {
+                debug!("Unable to send response to the client {e}");
+            }
             return;
         }
     };
 
-    match request.method {
+    let response = match request.method {
         Method::Get => match request.path.as_str() {
             "/sleep" => {
                 debug!("Received request for /sleep");
                 time::sleep(Duration::from_millis(2000)).await;
-                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
-                stream.write_all(response.as_bytes()).await.unwrap();
+                format!("HTTP/1.1 200{CRLF}{CRLF}")
             }
             "/health" => {
                 debug!("Received request for /health");
-                let response = format!("HTTP/1.1 200{CRLF}{CRLF}");
-                stream.write_all(response.as_bytes()).await.unwrap();
+                format!("HTTP/1.1 200{CRLF}{CRLF}")
             }
             _ => {
                 debug!("Received request for unmapped path");
-                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
-                stream.write_all(response.as_bytes()).await.unwrap();
+                format!("HTTP/1.1 404{CRLF}{CRLF}")
             }
         },
         Method::Post => match request.path.as_str() {
@@ -100,22 +99,21 @@ async fn process_request(mut stream: TcpStream) {
                 };
                 let content_type = format!("Content-Type: {content_type}");
                 let body = request.body.unwrap_or_default();
-                let response = format!(
-                    "HTTP/1.1 200{CRLF}{content_length}{CRLF}{content_type}{CRLF}{CRLF}{body}"
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
+                format!("HTTP/1.1 200{CRLF}{content_length}{CRLF}{content_type}{CRLF}{CRLF}{body}")
             }
             _ => {
                 debug!("Received request for unmapped path");
-                let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
-                stream.write_all(response.as_bytes()).await.unwrap();
+                format!("HTTP/1.1 404{CRLF}{CRLF}")
             }
         },
         Method::Unknown => {
             debug!("Received request for unknown method");
-            let response = format!("HTTP/1.1 404{CRLF}{CRLF}");
-            stream.write_all(response.as_bytes()).await.unwrap();
+            format!("HTTP/1.1 404{CRLF}{CRLF}")
         }
+    };
+
+    if let Err(e) = stream.write_all(response.as_bytes()).await {
+        debug!("Unable to send response to the client {e}");
     }
 }
 
