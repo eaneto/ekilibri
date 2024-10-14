@@ -7,7 +7,7 @@ use tokio::{
     time,
 };
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use uuid::Uuid;
 
@@ -53,8 +53,6 @@ async fn accept_and_handle_connection(listener: &TcpListener) {
 
 async fn process_request(mut stream: TcpStream) {
     let request_id = Uuid::new_v4();
-    info!("Received message, request_id={request_id}");
-
     let request = match parse_request(&request_id, &mut stream).await {
         Ok(request) => request,
         Err(e) => {
@@ -73,21 +71,22 @@ async fn process_request(mut stream: TcpStream) {
     let response = match request.method {
         Method::Get => match request.path.as_str() {
             "/sleep" => {
-                debug!("Received request for /sleep");
+                info!("Received request for /sleep, request_id={request_id}");
                 time::sleep(Duration::from_millis(2000)).await;
                 format!("HTTP/1.1 200{CRLF}{CRLF}")
             }
             "/health" => {
-                debug!("Received request for /health");
+                info!("Received request for /health, request_id={request_id}");
                 format!("HTTP/1.1 200{CRLF}{CRLF}")
             }
             _ => {
-                debug!("Received request for unmapped path");
+                info!("Received request for unmapped path, request_id={request_id}");
                 format!("HTTP/1.1 404{CRLF}{CRLF}")
             }
         },
         Method::Post => match request.path.as_str() {
             "/echo" => {
+                info!("Received request for /echo, request_id={request_id}");
                 let length = match request.headers.get("Content-Length") {
                     Some(value) => value,
                     None => "0",
@@ -102,12 +101,12 @@ async fn process_request(mut stream: TcpStream) {
                 format!("HTTP/1.1 200{CRLF}{content_length}{CRLF}{content_type}{CRLF}{CRLF}{body}")
             }
             _ => {
-                debug!("Received request for unmapped path");
+                info!("Received request for unmapped path, request_id={request_id}");
                 format!("HTTP/1.1 404{CRLF}{CRLF}")
             }
         },
         Method::Unknown => {
-            debug!("Received request for unknown method");
+            warn!("Received request for unmapped path, request_id={request_id}");
             format!("HTTP/1.1 404{CRLF}{CRLF}")
         }
     };

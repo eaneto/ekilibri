@@ -1,7 +1,8 @@
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU16, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -11,6 +12,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::RwLock,
+    time::timeout,
 };
 
 use tracing::{debug, info, trace, warn};
@@ -20,14 +22,28 @@ use clap::Parser;
 
 #[derive(Debug, Deserialize, Clone)]
 enum Strategies {
+    /// TODO: Document
     RoundRobin,
+    /// TODO: Document
     LeastConnections,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct Config {
+    /// List of the server addresses
     servers: Vec<String>,
+    /// Load balancing stragies.
     strategy: Strategies,
+    /// Maximum number of failed requests to stop balancing to.
+    max_fails: u16,
+    /// Timeout to consider a connection as failed.
+    connection_timeout: u16,
+    /// Timeout writing the data to the server.
+    write_timeout: u16,
+    /// Timeout reading the data to the server.
+    read_timeout: u16,
+    /// Health check path
+    health_check_path: String,
 }
 
 #[derive(Parser, Debug)]
@@ -37,7 +53,7 @@ struct Args {
     file: String,
 }
 
-type Servers = Arc<RwLock<Vec<String>>>;
+type Servers = Arc<RwLock<HashMap<u8, String>>>;
 
 #[tokio::main]
 async fn main() {
@@ -66,29 +82,119 @@ async fn main() {
 
     info!("Ekilibri listening at port 8080");
 
-    let servers = Servers::new(RwLock::new(config.servers.clone()));
+    let healthy_servers = Servers::new(RwLock::new(HashMap::new()));
+    for (id, server) in config.servers.iter().enumerate() {
+        healthy_servers
+            .write()
+            .await
+            .insert(id as u8, server.clone());
+    }
 
-    let servers_clone = servers.clone();
+    let health_servers_clone = Arc::clone(&healthy_servers);
+    let config_clone = config.clone();
     tokio::spawn(async move {
-        let servers = servers_clone.read().await;
-        info!("Initiating health checks {:?}", servers);
+        let config = config_clone;
+        let servers = config.servers;
+        let healthy_servers = health_servers_clone;
+
+        let mut timeouts = Vec::with_capacity(servers.len());
+        for _ in &servers {
+            timeouts.push(AtomicU16::new(0));
+        }
+
         loop {
-            for server in servers.iter() {
-                // TODO: call health
+            for (id, server) in servers.iter().enumerate() {
+                let request = format!("GET {} HTTP/1.1\r\n", config.health_check_path);
+                let mut stream = match timeout(
+                    Duration::from_millis(config.connection_timeout as u64),
+                    TcpStream::connect(server),
+                )
+                .await
+                {
+                    Ok(result) => match result {
+                        Ok(stream) => stream,
+                        Err(_) => {
+                            timeouts[id].fetch_add(1, Ordering::Relaxed);
+                            warn!("Server {server} is down");
+                            continue;
+                        }
+                    },
+                    Err(_) => {
+                        timeouts[id].fetch_add(1, Ordering::Relaxed);
+                        warn!("Server {server} is down");
+                        continue;
+                    }
+                };
+                // TODO: Timeout cancels the future, but write_all is
+                // not cancellation safe. Will this be a problem?
+                match timeout(
+                    Duration::from_millis(config.write_timeout as u64),
+                    stream.write_all(request.as_bytes()),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        if result.is_err() {
+                            timeouts[id].fetch_add(1, Ordering::Relaxed);
+                            warn!("Server {server} is down");
+                            continue;
+                        }
+                    }
+                    Err(_) => {
+                        timeouts[id].fetch_add(1, Ordering::Relaxed);
+                        warn!("Server {server} is down");
+                        continue;
+                    }
+                };
+                let mut buf = [0_u8; 128];
+                match timeout(
+                    Duration::from_millis(config.read_timeout as u64),
+                    stream.read(&mut buf),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        if result.is_err() {
+                            timeouts[id].fetch_add(1, Ordering::Relaxed);
+                            warn!("Server {server} is down");
+                            continue;
+                        }
+                    }
+                    Err(_) => {
+                        timeouts[id].fetch_add(1, Ordering::Relaxed);
+                        warn!("Server {server} is down");
+                        continue;
+                    }
+                };
+                let response = String::from_utf8_lossy(&buf);
+                let ok_response = "HTTP/1.1 200";
+                if response.starts_with(ok_response) {
+                    info!("Everything is ok at {server}");
+                } else {
+                    timeouts[id].fetch_add(1, Ordering::Relaxed);
+                    warn!("Server {server} is down");
+                }
+
+                // if reached_maximum_fails_accepted
+                // lock servers for write, remove server
+                if timeouts[id].load(Ordering::SeqCst) >= config.max_fails {
+                    let idx = id as u8;
+                    healthy_servers.write().await.remove(&idx);
+                }
             }
 
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     });
 
-    accept_and_handle_connections(listener, connections_counters, config, servers).await;
+    accept_and_handle_connections(listener, connections_counters, config, healthy_servers).await;
 }
 
 async fn accept_and_handle_connections(
     listener: TcpListener,
     connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
     config: Config,
-    servers: Servers,
+    healhty_servers: Servers,
 ) {
     match listener.accept().await {
         Ok((mut ekilibri_stream, _)) => {
@@ -97,7 +203,7 @@ async fn accept_and_handle_connections(
             tokio::spawn(async move {
                 handle_connection(
                     config,
-                    servers.clone(),
+                    Arc::clone(&healhty_servers),
                     connections_counters,
                     &mut ekilibri_stream,
                 )
@@ -122,6 +228,7 @@ async fn handle_connection(
         }
     };
 
+    // TODO: Remove expect and handle case where the server got unhealthy.
     let counters = connections_counters.read().await;
     let counter = counters
         .get(server_id)
@@ -202,6 +309,8 @@ async fn process_request(
     }
 }
 
+// TODO: Update choose functions to consider the values, not the size
+// of the map.
 async fn choose_server_round_robin(servers: Servers) -> usize {
     rand::random::<usize>() % servers.read().await.len()
 }
@@ -245,7 +354,20 @@ mod tests {
         let config = Config {
             servers,
             strategy: Strategies::LeastConnections,
+            max_fails: 0,
+            connection_timeout: 1000,
+            write_timeout: 1000,
+            read_timeout: 1000,
+            health_check_path: "/health".to_string(),
         };
+
+        let healthy_servers = Servers::new(RwLock::new(HashMap::new()));
+        for (id, server) in config.servers.iter().enumerate() {
+            healthy_servers
+                .write()
+                .await
+                .insert(id as u8, server.clone());
+        }
 
         let mut connections = Vec::new();
         connections.push(AtomicU64::new(15));
@@ -253,7 +375,8 @@ mod tests {
         connections.push(AtomicU64::new(6));
         let connections_counters = Arc::new(RwLock::new(connections));
 
-        let chosen_server = choose_server_least_connections(&config, connections_counters).await;
+        let chosen_server =
+            choose_server_least_connections(healthy_servers, connections_counters).await;
 
         assert_eq!(chosen_server, 2);
     }

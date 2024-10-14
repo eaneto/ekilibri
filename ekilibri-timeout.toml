@@ -18,4 +18,4 @@ write_timeout = 1000
 # Timeout reading the data to the server.
 read_timeout = 1000
 # Health check path
-health_check_path = "/health"
+health_check_path = "/sleep"
