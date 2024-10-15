@@ -141,13 +141,13 @@ async fn handle_connection(
         }
     };
 
-    // TODO: Remove expect and handle case where the server got unhealthy.
     let counters = connections_counters.read().await;
     let counter = counters
         .get(server_id)
         .expect("The counters should be initialized with every possible server_id at this point");
     counter.fetch_add(1, Ordering::Relaxed);
 
+    // TODO: Remove expect and handle case where the server got unhealthy.
     match TcpStream::connect(
         config.servers.get(server_id).expect(
             "The counters should be initialized with every possible server_id at this point",
@@ -225,7 +225,10 @@ async fn process_request(
 // TODO: Update choose functions to consider the values, not the size
 // of the map.
 async fn choose_server_round_robin(servers: HealthyServers) -> usize {
-    rand::random::<usize>() % servers.read().await.len()
+    let healthy_servers = servers.read().await;
+    let possible_servers: Vec<u8> = healthy_servers.keys().copied().collect();
+    let idx = rand::random::<usize>() % possible_servers.len();
+    possible_servers[idx] as usize
 }
 
 async fn choose_server_least_connections(
@@ -234,7 +237,7 @@ async fn choose_server_least_connections(
 ) -> usize {
     let mut chosen_server = 0;
     let counters = connections_counters.read().await;
-    for server_id in 1..servers.read().await.len() {
+    for server_id in servers.read().await.keys().copied() {
         let chosen_server_connections = counters
             .get(chosen_server)
             .expect(
@@ -242,13 +245,13 @@ async fn choose_server_least_connections(
             )
             .load(Ordering::Relaxed);
         let current_server_connections = counters
-            .get(server_id)
+            .get(server_id as usize)
             .expect(
                 "The counters should be initialized with every possible server_id at this point",
             )
             .load(Ordering::Relaxed);
         if chosen_server_connections > current_server_connections {
-            chosen_server = server_id;
+            chosen_server = server_id as usize;
         }
     }
     chosen_server
@@ -350,8 +353,8 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
             let idx = id as u8;
             // If the server id is not in the healthy_servers list,
             // than it has a non-zero value.
+            // FIXME
             if !healthy_servers.read().await.contains_key(&idx) {
-                // TODO: Re-add server to healthy_servers
                 let value = timeouts[id].fetch_sub(1, Ordering::Relaxed);
                 if value < config.max_fails {
                     healthy_servers.write().await.insert(idx, server.clone());
