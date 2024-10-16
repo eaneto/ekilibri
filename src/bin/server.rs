@@ -22,9 +22,10 @@ use clap::Parser;
 
 #[derive(Debug, Deserialize, Clone)]
 enum Strategies {
-    /// TODO: Document
+    /// Distribute requests randomly across the healthy servers.
     RoundRobin,
-    /// TODO: Document
+    /// Distribute requests to the healthy server with less
+    /// connections at the moment.
     LeastConnections,
 }
 
@@ -222,8 +223,6 @@ async fn process_request(
     }
 }
 
-// TODO: Update choose functions to consider the values, not the size
-// of the map.
 async fn choose_server_round_robin(servers: HealthyServers) -> usize {
     let healthy_servers = servers.read().await;
     let possible_servers: Vec<u8> = healthy_servers.keys().copied().collect();
@@ -260,6 +259,7 @@ async fn choose_server_least_connections(
 async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
     let servers = config.servers;
 
+    // TODO: Maybe timeouts should have a TTL.
     let mut timeouts = Vec::with_capacity(servers.len());
     for _ in &servers {
         timeouts.push(AtomicU64::new(0));
