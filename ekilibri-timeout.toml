@@ -9,4 +9,4 @@ fail_window = 60
 connection_timeout = 1000
 write_timeout = 1000
 read_timeout = 1000
-health_check_path = "/health"
+health_check_path = "/sleep"
