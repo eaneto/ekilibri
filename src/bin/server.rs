@@ -12,7 +12,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::RwLock,
-    time::timeout,
+    time::{timeout, Instant},
 };
 
 use tracing::{debug, info, trace, warn};
@@ -33,17 +33,26 @@ enum Strategies {
 struct Config {
     /// List of the server addresses
     servers: Vec<String>,
-    /// Load balancing stragies.
+    /// Load balancing strategy.
     strategy: Strategies,
-    /// Maximum number of failed requests to stop balancing to.
+    /// Maximum number of failed requests(non 200 responses and
+    /// timeouts) allowed before a server is taken from the healthy
+    /// servers list. A server that is not on this list won't receive
+    /// any requests. The health check process runs once every 500ms.
     max_fails: u64,
-    /// Timeout to consider a connection as failed.
+    /// The time window to consider the [Config::max_fails] and remove
+    /// a server from the healthy servers list, the time windows is
+    /// relevant so that "old" requests don't interfere in the
+    /// decision (in seconds).
+    fail_window: u16,
+    /// Timeout to establish a connection to one of the servers (in
+    /// milliseconds).
     connection_timeout: u32,
-    /// Timeout writing the data to the server.
+    /// Timeout writing the data to the server (in milliseconds).
     write_timeout: u32,
-    /// Timeout reading the data to the server.
+    /// Timeout reading the data to the server (in milliseconds).
     read_timeout: u32,
-    /// Health check path
+    /// The path to check the server's health. Ex.: "/health".
     health_check_path: String,
 }
 
@@ -259,19 +268,66 @@ async fn choose_server_least_connections(
 async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
     let servers = config.servers;
 
-    // TODO: Maybe timeouts should have a TTL.
-    let mut timeouts = Vec::with_capacity(servers.len());
+    let timeouts = Arc::new(RwLock::new(Vec::with_capacity(servers.len())));
     for _ in &servers {
-        timeouts.push(AtomicU64::new(0));
+        timeouts
+            .write()
+            .await
+            .push(RwLock::new(Vec::<Instant>::new()));
     }
+
+    // let timeouts = List (per server)
+    // Timeouts/Failures -> timeouts.push("Timestamp")
+    // read->counting every timeout after X O(N).
+    // If the list is ordered the search can be simpler.
+    // The list should drop timeouts that happened out of
+    // the window from time to time.
+    // Only the health check process modifies the list, so if
+    // a different process held a lock to clean the list of old
+    // timeouts that wouldn't be such a big problem.
+    // this also solves the correct way to detect if a server is
+    // back online again. Before the only thing considered was the
+    // absolute number of timeouts, if the threshold was 10 and there
+    // were 1000 timeouts, the server would only be considered online if
+    // the timeout value reached 9, so another 991 successful calls to
+    // the health path would be needed. Now, because of the TTL, the
+    // old timeouts will be dropped, and only considered in the window.
+    // problems:
+    // 1. lock on the list cleaning old timeouts may defer detection
+    // of a fault.
+    // 2. clock drift -> Instant is monotonic, so this is not possible.
+
+    // background job to remove dead timeouts.
+    let timeout_list_clone = Arc::clone(&timeouts);
+    let server_count = servers.len();
+    tokio::spawn(async move {
+        loop {
+            debug!("Looking for timeouts to clean");
+            for id in 0..server_count {
+                timeout_list_clone
+                    .read()
+                    .await
+                    .get(id)
+                    .expect("The timeout list should be initialized with each server id")
+                    .write()
+                    .await
+                    .retain(|timeout| {
+                        // If the timeout is inside the window.
+                        timeout.elapsed().as_secs() < config.fail_window as u64
+                    });
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+    });
 
     loop {
         for (id, server) in servers.iter().enumerate() {
             let idx = id as u8;
+            let timeout_count = count_server_timeouts(&timeouts, id, config.fail_window).await;
+
             // Has reached maximum quantity fails allowed and is in
             // the list of healthy servers?
-            if timeouts[id].load(Ordering::SeqCst) >= config.max_fails
-                && healthy_servers.read().await.contains_key(&idx)
+            if timeout_count >= config.max_fails && healthy_servers.read().await.contains_key(&idx)
             {
                 let idx = id as u8;
                 healthy_servers.write().await.remove(&idx);
@@ -288,13 +344,13 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
                 Ok(result) => match result {
                     Ok(stream) => stream,
                     Err(_) => {
-                        timeouts[id].fetch_add(1, Ordering::Relaxed);
+                        timeouts.read().await[id].write().await.push(Instant::now());
                         warn!("Server {server} might be down");
                         continue;
                     }
                 },
                 Err(_) => {
-                    timeouts[id].fetch_add(1, Ordering::Relaxed);
+                    timeouts.read().await[id].write().await.push(Instant::now());
                     warn!("Timeout, server {server} might be down");
                     continue;
                 }
@@ -310,13 +366,13 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
             {
                 Ok(result) => {
                     if result.is_err() {
-                        timeouts[id].fetch_add(1, Ordering::Relaxed);
+                        timeouts.read().await[id].write().await.push(Instant::now());
                         warn!("Server {server} might be down");
                         continue;
                     }
                 }
                 Err(_) => {
-                    timeouts[id].fetch_add(1, Ordering::Relaxed);
+                    timeouts.read().await[id].write().await.push(Instant::now());
                     warn!("Timeout, server {server} might be down");
                     continue;
                 }
@@ -330,13 +386,13 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
             {
                 Ok(result) => {
                     if result.is_err() {
-                        timeouts[id].fetch_add(1, Ordering::Relaxed);
+                        timeouts.read().await[id].write().await.push(Instant::now());
                         warn!("Server {server} might be down");
                         continue;
                     }
                 }
                 Err(_) => {
-                    timeouts[id].fetch_add(1, Ordering::Relaxed);
+                    timeouts.read().await[id].write().await.push(Instant::now());
                     warn!("Timeout, server {server} might be down");
                     continue;
                 }
@@ -346,17 +402,16 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
             if response.starts_with(ok_response) {
                 debug!("Everything is ok at {server}");
             } else {
-                timeouts[id].fetch_add(1, Ordering::Relaxed);
+                timeouts.read().await[id].write().await.push(Instant::now());
                 warn!("Server {server} might be down");
             }
 
             let idx = id as u8;
             // If the server id is not in the healthy_servers list,
             // than it has a non-zero value.
-            // FIXME
             if !healthy_servers.read().await.contains_key(&idx) {
-                let value = timeouts[id].fetch_sub(1, Ordering::Relaxed);
-                if value < config.max_fails {
+                let timeout_count = count_server_timeouts(&timeouts, id, config.fail_window).await;
+                if timeout_count < config.max_fails {
                     healthy_servers.write().await.insert(idx, server.clone());
                     info!("Everything seems to be fine with server {server} now, re-added to the list of healthy servers");
                 }
@@ -364,6 +419,27 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    async fn count_server_timeouts(
+        timeouts: &Arc<RwLock<Vec<RwLock<Vec<Instant>>>>>,
+        server_id: usize,
+        fail_window: u16,
+    ) -> u64 {
+        let timeouts = timeouts.read().await;
+        let server_timeouts = timeouts
+            .get(server_id)
+            .expect("The timeout list should be initialized with each server id")
+            .read()
+            .await;
+
+        let mut counter = 0;
+        for timeout in server_timeouts.iter() {
+            if timeout.elapsed().as_secs() < fail_window as u64 {
+                counter += 1;
+            }
+        }
+        counter
     }
 }
 
@@ -381,6 +457,7 @@ mod tests {
             servers,
             strategy: Strategies::LeastConnections,
             max_fails: 0,
+            fail_window: 1,
             connection_timeout: 1000,
             write_timeout: 1000,
             read_timeout: 1000,

@@ -1,21 +1,12 @@
-# List of the server addresses
 servers = [
     "127.0.0.1:8081",
     "127.0.0.1:8082",
     "127.0.0.1:8083"
 ]
-# Load balancing stragies.
-# Possible values:
-# - RoundRobin
-# - LeastConnections
 strategy = "LeastConnections"
-# Maximum number of failed requests to stop balancing to.
 max_fails = 5
-# Timeout to consider a connection as failed.
+fail_window = 60
 connection_timeout = 1000
-# Timeout writing the data to the server.
 write_timeout = 1000
-# Timeout reading the data to the server.
 read_timeout = 1000
-# Health check path
 health_check_path = "/health"
