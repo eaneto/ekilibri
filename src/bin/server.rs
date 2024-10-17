@@ -63,6 +63,8 @@ struct Args {
     file: String,
 }
 
+/// Map of servers that ekilibri will use to consider to balance requests, each
+/// mapped by id.
 type HealthyServers = Arc<RwLock<HashMap<u8, String>>>;
 
 #[tokio::main]
@@ -265,6 +267,25 @@ async fn choose_server_least_connections(
     chosen_server
 }
 
+/// Checks if all the servers in the configuration([Config::servers]) are healthy.
+/// If a server times out or answers the health endpoint([Config::health_check_path])
+/// with something different than a 200, than the server is considered unhealthy
+/// and a timestamp is saved recording when the error happened. This data is used
+/// when considering to drop a server from the healthy servers list([HealthyServers]).
+/// This process considers the time window defined in the configuration([Config::fail_window])
+/// counting all errors recorded inside this time window. When the number of errors
+/// in this window is lesser than the configured Config::max_fails, the server is
+/// added to the list of healthy servers again.
+/// A background process runs cleaning the list of errors, retaining only the errors
+/// that happened inside the time window, this job runs every 10 seconds.
+///
+/// # Problems
+///
+/// The main problem of this solution is the need to run a "garbage collection" job
+/// to remove the invalid entries from the errors list. If the user configures a big
+/// time window, the list may grow too much if there are multiple errors. This job
+/// also locks the error list, so the health check process can't insert an error
+/// while the GC job is running.
 async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
     let servers = config.servers;
 
@@ -275,27 +296,6 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
             .await
             .push(RwLock::new(Vec::<Instant>::new()));
     }
-
-    // let timeouts = List (per server)
-    // Timeouts/Failures -> timeouts.push("Timestamp")
-    // read->counting every timeout after X O(N).
-    // If the list is ordered the search can be simpler.
-    // The list should drop timeouts that happened out of
-    // the window from time to time.
-    // Only the health check process modifies the list, so if
-    // a different process held a lock to clean the list of old
-    // timeouts that wouldn't be such a big problem.
-    // this also solves the correct way to detect if a server is
-    // back online again. Before the only thing considered was the
-    // absolute number of timeouts, if the threshold was 10 and there
-    // were 1000 timeouts, the server would only be considered online if
-    // the timeout value reached 9, so another 991 successful calls to
-    // the health path would be needed. Now, because of the TTL, the
-    // old timeouts will be dropped, and only considered in the window.
-    // problems:
-    // 1. lock on the list cleaning old timeouts may defer detection
-    // of a fault.
-    // 2. clock drift -> Instant is monotonic, so this is not possible.
 
     // background job to remove dead timeouts.
     let timeout_list_clone = Arc::clone(&timeouts);
@@ -377,7 +377,7 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
                     continue;
                 }
             };
-            let mut buf = [0_u8; 128];
+            let mut buf = [0_u8; 12];
             match timeout(
                 Duration::from_millis(config.read_timeout as u64),
                 stream.read(&mut buf),
@@ -407,8 +407,6 @@ async fn check_servers_health(config: Config, healthy_servers: HealthyServers) {
             }
 
             let idx = id as u8;
-            // If the server id is not in the healthy_servers list,
-            // than it has a non-zero value.
             if !healthy_servers.read().await.contains_key(&idx) {
                 let timeout_count = count_server_timeouts(&timeouts, id, config.fail_window).await;
                 if timeout_count < config.max_fails {
