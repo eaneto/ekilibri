@@ -6,6 +6,7 @@ from ekilibri_setup import kill_process, setup_command_server
 def pytest_addoption(parser):
     parser.addoption("--profile", action="store", default="local")
     parser.addoption("--setup-server", action="store", default="true")
+    parser.addoption("--attach-logs", action="store", default="false")
 
 
 @pytest.fixture(autouse=True)

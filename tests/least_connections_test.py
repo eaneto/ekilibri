@@ -104,9 +104,6 @@ def test_echo_server_without_content_type(request):
         kill_process(pid)
 
 
-@pytest.mark.skip(
-    reason="TODO: Still need to fix parsing payloads bigger than 1kb and responses over 1kb"
-)
 def test_echo_server_with_big_body(request):
     pid = setup_ekilibri_server(request, "tests/ekilibri-least-connections.toml")
     try:
@@ -124,9 +121,6 @@ def test_echo_server_with_big_body(request):
         kill_process(pid)
 
 
-@pytest.mark.skip(
-    reason="TODO: Still need to fix parsing payloads bigger than 1kb and responses over 1kb"
-)
 def test_echo_server_with_huge_body(request):
     pid = setup_ekilibri_server(request, "tests/ekilibri-least-connections.toml")
     try:

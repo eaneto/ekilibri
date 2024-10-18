@@ -34,11 +34,16 @@ def kill_process(pid):
 
 def setup_ekilibri_server(request, config_path: str) -> int:
     profile = request.config.getoption("--profile")
-    return initialize_ekilibri_server(profile, config_path)
+    attach_logs = request.config.getoption("--attach-logs")
+    return initialize_ekilibri_server(profile, attach_logs, config_path)
 
 
 def initialize_ekilibri_server(
-    profile: str, config_path: str, port: int = 8080, args: Optional[str] = None
+    profile: str,
+    attach_logs: str,
+    config_path: str,
+    port: int = 8080,
+    args: Optional[str] = None,
 ):
     if profile == "docker":
         binary = "ekilibri"
@@ -47,7 +52,12 @@ def initialize_ekilibri_server(
     command = [binary, "-f", config_path]
     if args is not None:
         command.extend(args.split(" "))
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if attach_logs == "true":
+        process = subprocess.Popen(command)
+    else:
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
     time.sleep(0.1)
     return process.pid
 
