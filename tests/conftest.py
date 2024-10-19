@@ -10,7 +10,7 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(autouse=True)
-def setup_and_teardown_rog_server(request):
+def setup_and_teardown_command_servers(request):
     if request.config.getoption("--setup-server") == "true":
         pids = []
         try:
