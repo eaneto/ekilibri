@@ -20,3 +20,4 @@ toml = "0.8.19"
 rand = "0.8.5"
 clap = { version = "4.5.16", features = ["derive"] }
 uuid = { version = "1.10.0", features = ["v4", "fast-rng"] }
+thiserror = "1.0.64"
