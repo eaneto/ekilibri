@@ -104,7 +104,7 @@ pub async fn parse_request(
                 Some(value) => value.trim_start().to_string(),
                 None => return Err(ParsingError::MalformedHeader),
             };
-            headers.insert(key, value);
+            headers.insert(key.to_ascii_lowercase(), value);
             header_position = i + 2;
 
             // This means \r\n\r\n, which is the end of the headers
@@ -119,8 +119,7 @@ pub async fn parse_request(
 
     // content-length should be required if method is post:
     if method == "POST" {
-        // FIXME: lowercase headers keys
-        let content_length = match headers.get("Content-Length") {
+        let content_length = match headers.get("content-length") {
             Some(length) => length,
             None => return Err(ParsingError::MissingContentLength),
         };

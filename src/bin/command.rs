@@ -86,12 +86,12 @@ async fn process_request(mut stream: TcpStream) {
         Method::Post => match request.path.as_str() {
             "/echo" => {
                 info!("Received request for /echo, request_id={request_id}");
-                let length = match request.headers.get("Content-Length") {
+                let length = match request.headers.get("content-length") {
                     Some(value) => value,
                     None => "0",
                 };
                 let content_length = format!("Content-Length: {length}");
-                let content_type = match request.headers.get("Content-Type") {
+                let content_type = match request.headers.get("content-type") {
                     Some(value) => value,
                     None => "text/plain",
                 };
