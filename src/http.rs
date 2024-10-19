@@ -143,9 +143,6 @@ pub async fn parse_request(
                 buf.resize(cursor * 2, 0);
             }
 
-            // FIXME: I think there might be a bug here, in case
-            // there's an error, or there's nothing to read from the
-            // socket.
             let current_bytes_read = match stream.read(&mut buf[cursor..]).await {
                 Ok(size) => size,
                 Err(e) => {
@@ -155,7 +152,7 @@ pub async fn parse_request(
             };
 
             if bytes_read == 0 {
-                panic!("HELP");
+                break;
             }
 
             cursor += current_bytes_read;
