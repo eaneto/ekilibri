@@ -1,3 +1,4 @@
+use ekilibri::http::{parse_request, ParseErrorKind, CRLF};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -9,7 +10,7 @@ use std::{
 };
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::RwLock,
     time::{timeout, Instant},
@@ -186,24 +187,26 @@ async fn handle_connection(
 // TODO: Consider configuration timeouts.
 async fn process_request(
     request_id: Uuid,
-    mut ekilibri_stream: &mut TcpStream,
-    mut server_stream: &mut TcpStream,
+    ekilibri_stream: &mut TcpStream,
+    server_stream: &mut TcpStream,
 ) {
     // Read data from client and send it to the server
-    let mut buf_reader = BufReader::new(&mut ekilibri_stream);
-    let mut buf = [0_u8; 1024];
-    match buf_reader.read(&mut buf).await {
-        Ok(size) => {
-            trace!(
-                "Successfully read data from client stream, size={size}, request_id={request_id}"
-            )
-        }
-        Err(_) => {
-            trace!("Unable to read data from client stream, request_id={request_id}");
+    let request = match parse_request(&request_id, ekilibri_stream).await {
+        Ok((_, raw_request)) => raw_request,
+        Err(e) => {
+            let status = match e {
+                ParseErrorKind::MissingContentLength => "411",
+                _ => "400",
+            };
+            let response = format!("HTTP/1.1 {status}{CRLF}{CRLF}");
+            if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
+                debug!("Unable to send response to the client {e}");
+            }
             return;
         }
-    }
-    match server_stream.write_all(&buf).await {
+    };
+
+    match server_stream.write_all(&request).await {
         Ok(()) => {
             trace!("Successfully sent client data to server, request_id={request_id}")
         }
@@ -214,20 +217,34 @@ async fn process_request(
     }
 
     // Reply client with same response from server
-    let mut buf_reader = BufReader::new(&mut server_stream);
-    let mut buf = [0_u8; 1024];
-    match buf_reader.read(&mut buf).await {
-        Ok(size) => {
-            trace!(
-                "Successfully read data from server stream, size={size}, request_id={request_id}"
-            )
+    let mut cursor = 0;
+    let mut buf = vec![0_u8; 4096];
+    loop {
+        if buf.len() == cursor {
+            buf.resize(cursor * 2, 0);
         }
-        Err(_) => {
-            trace!("Unable to read data from server stream, request_id={request_id}");
-            return;
+
+        let bytes_read = match server_stream.read(&mut buf[cursor..]).await {
+            Ok(size) => {
+                trace!(
+                "Successfully read data from server stream, size={size}, request_id={request_id}"
+                );
+                size
+            }
+            Err(_) => {
+                trace!("Unable to read data from server stream, request_id={request_id}");
+                0
+            }
+        };
+
+        cursor += bytes_read;
+
+        if bytes_read == 0 || cursor < buf.len() {
+            break;
         }
     }
-    match ekilibri_stream.write_all(&buf).await {
+
+    match ekilibri_stream.write_all(&buf[..cursor]).await {
         Ok(()) => {
             trace!("Successfully sent server data to client, request_id={request_id}")
         }
