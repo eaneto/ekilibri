@@ -1,4 +1,4 @@
-use ekilibri::http::{parse_request, ParseErrorKind, CRLF};
+use ekilibri::http::{parse_request, ParsingError, CRLF, HTTP_VERSION};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -8,6 +8,7 @@ use std::{
     },
     time::Duration,
 };
+use thiserror::Error;
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -148,11 +149,48 @@ async fn handle_connection(
     ekilibri_stream: &mut TcpStream,
 ) {
     let request_id = Uuid::new_v4();
-    let server_id = match config.strategy {
+    let request = match parse_request(&request_id, ekilibri_stream).await {
+        Ok((_, raw_request)) => raw_request,
+        Err(e) => {
+            warn!(
+                "There was an error while parsing the request, request_id={request_id}, error={e}"
+            );
+            let (status, reason) = match e {
+                ParsingError::MissingContentLength => (411, "Length Required"),
+                ParsingError::HTTPVersionNotSupported => (505, "HTTP Version not supported"),
+                _ => (400, "Bad Request"),
+            };
+            let response = format!("{HTTP_VERSION} {status} {reason}{CRLF}{CRLF}");
+            if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
+                debug!("Unable to send response to the client {e}");
+            }
+            return;
+        }
+    };
+
+    let result = match config.strategy {
         Strategies::RoundRobin => choose_server_round_robin(healthy_servers).await,
         Strategies::LeastConnections => {
             choose_server_least_connections(healthy_servers, Arc::clone(&connections_counters))
                 .await
+        }
+    };
+
+    let server_id = match result {
+        Ok(id) => id,
+        Err(e) => {
+            let response = match e {
+                RequestError::NoHealthyServer => {
+                    format!("{HTTP_VERSION} 504 Gateway Time-out{CRLF}{CRLF}")
+                }
+            };
+            warn!(
+                "Error choosing a possible server to route request, request_id={request_id}, error={e}"
+            );
+            if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
+                trace!("Error sending response to client, request_id={request_id}, {e}")
+            }
+            return;
         }
     };
 
@@ -173,11 +211,15 @@ async fn handle_connection(
         Ok(mut server_stream) => {
             if server_stream.set_nodelay(true).is_ok() {
                 info!("Connected to server, server_id={server_id}, request_id={request_id}");
-                process_request(request_id, ekilibri_stream, &mut server_stream).await;
+                process_request(request_id, request, ekilibri_stream, &mut server_stream).await;
             }
         }
         Err(e) => {
-            warn!("Can't connect to server, server_id={server_id}, request_id={request_id}. {e}")
+            warn!("Can't connect to server, server_id={server_id}, request_id={request_id}. {e}");
+            let response = format!("{HTTP_VERSION} 502 Bad Gateway{CRLF}{CRLF}");
+            if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
+                trace!("Error sending response to client, request_id={request_id}, {e}")
+            }
         }
     }
 
@@ -185,33 +227,19 @@ async fn handle_connection(
 }
 
 // TODO: Consider configuration timeouts.
+/// Takes the [request] data and send it to the chosen server.
 async fn process_request(
     request_id: Uuid,
+    request: Vec<u8>,
     ekilibri_stream: &mut TcpStream,
     server_stream: &mut TcpStream,
 ) {
-    // Read data from client and send it to the server
-    let request = match parse_request(&request_id, ekilibri_stream).await {
-        Ok((_, raw_request)) => raw_request,
-        Err(e) => {
-            let status = match e {
-                ParseErrorKind::MissingContentLength => "411",
-                _ => "400",
-            };
-            let response = format!("HTTP/1.1 {status}{CRLF}{CRLF}");
-            if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
-                debug!("Unable to send response to the client {e}");
-            }
-            return;
-        }
-    };
-
     match server_stream.write_all(&request).await {
         Ok(()) => {
             trace!("Successfully sent client data to server, request_id={request_id}")
         }
-        Err(_) => {
-            trace!("Unable to send client data to server, request_id={request_id}");
+        Err(e) => {
+            trace!("Unable to send client data to server, request_id={request_id}, {e}");
             return;
         }
     }
@@ -248,31 +276,41 @@ async fn process_request(
         Ok(()) => {
             trace!("Successfully sent server data to client, request_id={request_id}")
         }
-        Err(_) => {
-            trace!("Unable to send server data to client, request_id={request_id}");
+        Err(e) => {
+            trace!("Unable to send server data to client, request_id={request_id}, {e}");
         }
     }
 }
 
-// FIXME: Returns error if all servers are down
-async fn choose_server_round_robin(servers: HealthyServers) -> usize {
-    let healthy_servers = servers.read().await;
-    let possible_servers: Vec<u8> = healthy_servers.keys().copied().collect();
-    let idx = rand::random::<usize>() % possible_servers.len();
-    possible_servers[idx] as usize
+#[derive(Error, Debug)]
+enum RequestError {
+    #[error("None of the servers configured are healthy at this moment")]
+    NoHealthyServer,
 }
 
-// FIXME: Returns error if all servers are down
+async fn choose_server_round_robin(servers: HealthyServers) -> Result<usize, RequestError> {
+    let healthy_servers = servers.read().await;
+    if healthy_servers.is_empty() {
+        return Err(RequestError::NoHealthyServer);
+    }
+    let possible_servers: Vec<u8> = healthy_servers.keys().copied().collect();
+    let idx = rand::random::<usize>() % possible_servers.len();
+    Ok(possible_servers[idx] as usize)
+}
+
 async fn choose_server_least_connections(
     healthy_servers: HealthyServers,
     connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
-) -> usize {
-    let counters = connections_counters.read().await;
+) -> Result<usize, RequestError> {
     let healthy_servers = healthy_servers.read().await;
+    if healthy_servers.is_empty() {
+        return Err(RequestError::NoHealthyServer);
+    }
+    let counters = connections_counters.read().await;
     let possible_servers: Vec<u8> = healthy_servers.keys().copied().collect();
     let mut chosen_server = *possible_servers
         .first()
-        .expect("FIXME At least one server should be up (NOT TRUE)")
+        .expect("There should be at least one server in the list at this point")
         as usize;
     for server_id in possible_servers {
         let chosen_server_connections = counters
@@ -291,7 +329,7 @@ async fn choose_server_least_connections(
             chosen_server = server_id as usize;
         }
     }
-    chosen_server
+    Ok(chosen_server)
 }
 
 /// Checks if all the servers in the configuration([Config::servers]) are healthy.
@@ -362,6 +400,10 @@ async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServe
                 continue;
             }
 
+            // TODO: Create a connection pool so that connections
+            // don't need to be established every single call and the
+            // user can limit the amount of possible connections per
+            // server.
             let mut stream = match timeout(
                 Duration::from_millis(config.connection_timeout as u64),
                 TcpStream::connect(server),
@@ -384,7 +426,7 @@ async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServe
             };
             // TODO: Timeout cancels the future, but write_all is
             // not cancellation safe. Will this be a problem?
-            let request = format!("GET {} HTTP/1.1\r\n", config.health_check_path);
+            let request = format!("GET {} {HTTP_VERSION}\r\n", config.health_check_path);
             match timeout(
                 Duration::from_millis(config.write_timeout as u64),
                 stream.write_all(request.as_bytes()),
@@ -425,9 +467,9 @@ async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServe
                 }
             };
             let response = String::from_utf8_lossy(&buf);
-            let ok_response = "HTTP/1.1 200";
-            if response.starts_with(ok_response) {
-                debug!("Everything is ok at {server}");
+            let ok_response = format!("{HTTP_VERSION} 200");
+            if response.starts_with(&ok_response) {
+                trace!("Everything is ok at {server}");
             } else {
                 timeouts.read().await[id].write().await.push(Instant::now());
                 warn!("Server {server} might be down");
@@ -473,28 +515,27 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn choosing_server_round_robin_without_healthy_servers() {
+        let healthy_servers = HealthyServers::new(RwLock::new(HashMap::new()));
+
+        let chosen_server = choose_server_round_robin(healthy_servers).await;
+
+        assert_eq!(chosen_server.is_err(), true);
+    }
+
+    #[tokio::test]
     async fn choosing_server_with_least_connections() {
         let mut servers = Vec::new();
         servers.push("127.0.0.1:8080".to_string());
         servers.push("127.0.0.1:8081".to_string());
         servers.push("127.0.0.1:8082".to_string());
-        let config = Config {
-            servers,
-            strategy: Strategies::LeastConnections,
-            max_fails: 0,
-            fail_window: 1,
-            connection_timeout: 1000,
-            write_timeout: 1000,
-            read_timeout: 1000,
-            health_check_path: "/health".to_string(),
-        };
 
         let healthy_servers = HealthyServers::new(RwLock::new(HashMap::new()));
-        for (id, server) in config.servers.iter().enumerate() {
-            healthy_servers
-                .write()
-                .await
-                .insert(id as u8, server.clone());
+        {
+            let mut servers = healthy_servers.write().await;
+            servers.insert(0, "127.0.0.1:8080".to_string());
+            servers.insert(1, "127.0.0.1:8081".to_string());
+            servers.insert(2, "127.0.0.1:8082".to_string());
         }
 
         let mut connections = Vec::new();
@@ -506,6 +547,22 @@ mod tests {
         let chosen_server =
             choose_server_least_connections(healthy_servers, connections_counters).await;
 
-        assert_eq!(chosen_server, 2);
+        assert_eq!(chosen_server.is_ok(), true);
+        assert_eq!(chosen_server.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn choosing_server_with_least_connections_without_healthy_servers() {
+        let healthy_servers = HealthyServers::new(RwLock::new(HashMap::new()));
+        let mut connections = Vec::new();
+        connections.push(AtomicU64::new(0));
+        connections.push(AtomicU64::new(0));
+        connections.push(AtomicU64::new(0));
+        let connections_counters = Arc::new(RwLock::new(connections));
+
+        let chosen_server =
+            choose_server_least_connections(healthy_servers, connections_counters).await;
+
+        assert_eq!(chosen_server.is_err(), true);
     }
 }

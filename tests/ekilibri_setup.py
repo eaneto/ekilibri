@@ -28,14 +28,18 @@ def initialize_command_server(
 
 
 def kill_process(pid):
-    os.kill(pid, signal.SIGTERM)
-    time.sleep(0.5)
+    if pid != -1:
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
 
 
 def setup_ekilibri_server(request, config_path: str) -> int:
     profile = request.config.getoption("--profile")
     attach_logs = request.config.getoption("--attach-logs")
-    return initialize_ekilibri_server(profile, attach_logs, config_path)
+    if request.config.getoption("--setup-server") == "true":
+        return initialize_ekilibri_server(profile, attach_logs, config_path)
+    else:
+        return -1
 
 
 def initialize_ekilibri_server(
@@ -67,3 +71,11 @@ def find_and_kill_command_server():
     name = "command"
     process = [p for p in processes if name in p.name()][0]
     os.kill(process.pid, signal.SIGTERM)
+
+
+def find_and_kill_all_command_servers():
+    processes = psutil.process_iter()
+    name = "command"
+    processes = [p for p in processes if name in p.name()]
+    for process in processes:
+        os.kill(process.pid, signal.SIGTERM)

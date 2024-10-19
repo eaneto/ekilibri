@@ -7,6 +7,7 @@ import pytest
 import requests
 
 from ekilibri_setup import (
+    find_and_kill_all_command_servers,
     find_and_kill_command_server,
     kill_process,
     setup_ekilibri_server,
@@ -44,6 +45,28 @@ def test_multiple_get_request_to_three_servers_with_two_failed(request):
         for _ in range(100):
             response = requests.get(URL + "/health")
             assert response.status_code == 200
+    finally:
+        kill_process(pid)
+
+
+def test_multiple_get_request_to_three_servers_with_all_failed(request):
+    pid = setup_ekilibri_server(request, "tests/ekilibri-least-connections.toml")
+    try:
+        response = requests.get(URL + "/health")
+        assert response.status_code == 200
+
+        find_and_kill_all_command_servers()
+
+        for _ in range(10):
+            response = requests.get(URL + "/health")
+            assert response.status_code == 502
+
+        # Wait the fail window for ekilibri to remove the server
+        sleep(10.5)
+
+        for _ in range(10):
+            response = requests.get(URL + "/health")
+            assert response.status_code == 504
     finally:
         kill_process(pid)
 

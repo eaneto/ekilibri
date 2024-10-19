@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use uuid::Uuid;
 
-use ekilibri::http::{parse_request, Method, ParseErrorKind, CRLF};
+use ekilibri::http::{parse_request, Method, ParsingError, CRLF};
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -55,7 +55,8 @@ async fn process_request(mut stream: TcpStream) {
         Ok((request, _)) => request,
         Err(e) => {
             let status = match e {
-                ParseErrorKind::MissingContentLength => "411",
+                ParsingError::MissingContentLength => "411",
+                ParsingError::HTTPVersionNotSupported => "505",
                 _ => "400",
             };
             let response = format!("HTTP/1.1 {status}{CRLF}{CRLF}");

@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use thiserror::Error;
 
+use std::collections::HashMap;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 
 use tracing::debug;
 
 const CR: u8 = 13;
 const LF: u8 = 10;
+pub const HTTP_VERSION: &str = "HTTP/1.1";
 pub const CRLF: &str = "\r\n";
 
 pub enum Method {
@@ -21,21 +23,29 @@ pub struct Request {
     pub body: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum ParseErrorKind {
+#[derive(Error, Debug)]
+pub enum ParsingError {
+    #[error("There was no data to be read from the socket")]
     UnableToRead,
+    #[error("The request line was impossible to parse, missing information")]
     MalformedRequest,
+    #[error("The header is not parseable")]
     MalformedHeader,
+    #[error("The request was not sent with the content-length header")]
     MissingContentLength,
+    #[error("The request was sent with an invalid content-length value")]
     InvalidContentLength,
+    #[error("The request was sent for an unsupported HTTP version")]
+    HTTPVersionNotSupported,
 }
 
 pub async fn parse_request(
     request_id: &uuid::Uuid,
     stream: &mut TcpStream,
-) -> Result<(Request, Vec<u8>), ParseErrorKind> {
+) -> Result<(Request, Vec<u8>), ParsingError> {
     let mut method = String::new();
     let mut path = String::new();
+    let mut protocol = String::new();
     let mut headers = HashMap::<String, String>::new();
     let mut body: Option<String> = None;
 
@@ -49,7 +59,7 @@ pub async fn parse_request(
     };
 
     if bytes_read == 0 {
-        return Err(ParseErrorKind::UnableToRead);
+        return Err(ParsingError::UnableToRead);
     }
 
     // Parse request line
@@ -60,19 +70,23 @@ pub async fn parse_request(
             let mut request_line = request_line.split_whitespace();
             method = match request_line.next() {
                 Some(method) => method.to_string(),
-                None => return Err(ParseErrorKind::MalformedRequest),
+                None => return Err(ParsingError::MalformedRequest),
             };
             path = match request_line.next() {
                 Some(path) => path.to_string(),
-                None => return Err(ParseErrorKind::MalformedRequest),
+                None => return Err(ParsingError::MalformedRequest),
             };
-            _ = match request_line.next() {
+            protocol = match request_line.next() {
                 Some(protocol) => protocol.to_string(),
-                None => return Err(ParseErrorKind::MalformedRequest),
+                None => return Err(ParsingError::MalformedRequest),
             };
             initial_position = i + 2;
             break;
         }
+    }
+
+    if protocol != HTTP_VERSION {
+        return Err(ParsingError::HTTPVersionNotSupported);
     }
 
     // Parse headers
@@ -84,11 +98,11 @@ pub async fn parse_request(
             let mut header_line = header_line.split(":");
             let key = match header_line.next() {
                 Some(key) => key.to_string(),
-                None => return Err(ParseErrorKind::MalformedHeader),
+                None => return Err(ParsingError::MalformedHeader),
             };
             let value = match header_line.next() {
                 Some(value) => value.trim_start().to_string(),
-                None => return Err(ParseErrorKind::MalformedHeader),
+                None => return Err(ParsingError::MalformedHeader),
             };
             headers.insert(key, value);
             header_position = i + 2;
@@ -108,12 +122,12 @@ pub async fn parse_request(
         // FIXME: lowercase headers keys
         let content_length = match headers.get("Content-Length") {
             Some(length) => length,
-            None => return Err(ParseErrorKind::MissingContentLength),
+            None => return Err(ParsingError::MissingContentLength),
         };
 
         let content_length = match content_length.parse::<u32>() {
             Ok(length) => length,
-            Err(_) => return Err(ParseErrorKind::InvalidContentLength),
+            Err(_) => return Err(ParsingError::InvalidContentLength),
         };
 
         if bytes_read - initial_position >= content_length as usize {
