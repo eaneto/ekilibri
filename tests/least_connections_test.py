@@ -143,8 +143,7 @@ def test_get_not_found(request):
     try:
         response = requests.get(URL + "/not-found")
         assert response.status_code == 404
-        # TODO: Fix payload sent by the server
-        # assert response.text == ""
+        assert response.text == ""
     finally:
         kill_process(pid)
 
@@ -154,7 +153,6 @@ def test_post_not_found(request):
     try:
         response = requests.post(URL + "/not-found", data="data")
         assert response.status_code == 404
-        # TODO: Fix payload sent by the server
-        # assert response.text == ""
+        assert response.text == ""
     finally:
         kill_process(pid)
