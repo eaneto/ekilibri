@@ -1,7 +1,7 @@
 # Ekilibri
 
-Ekilibri is learning project, it is a HTTP 1.1 server and load
-balancer.
+Ekilibri is, firstly, a learning project! It is an HTTP 1.1 server and
+load balancer.
 
 ## TODO
 
