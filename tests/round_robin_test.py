@@ -72,6 +72,16 @@ def test_multiple_get_request_to_three_servers_with_all_failed(request):
         kill_process(pid)
 
 
+def test_multiple_get_request_with_timeout(request):
+    pid = setup_ekilibri_server(request, "tests/ekilibri-round-robin.toml")
+    try:
+        for _ in range(10):
+            response = requests.get(URL + "/sleep")
+            assert response.status_code == 504
+    finally:
+        kill_process(pid)
+
+
 def test_echo_server(request):
     pid = setup_ekilibri_server(request, "tests/ekilibri-round-robin.toml")
     try:
