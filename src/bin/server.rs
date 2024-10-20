@@ -200,47 +200,95 @@ async fn handle_connection(
         .expect("The counters should be initialized with every possible server_id at this point");
     counter.fetch_add(1, Ordering::Relaxed);
 
-    match TcpStream::connect(
-        config
-            .servers
-            .get(server_id)
-            .expect("The strategy functions should return a possible server_id at this point"),
+    let response = match timeout(
+        Duration::from_millis(config.connection_timeout as u64),
+        TcpStream::connect(
+            config
+                .servers
+                .get(server_id)
+                .expect("The strategy functions should return a possible server_id at this point"),
+        ),
     )
     .await
     {
-        Ok(mut server_stream) => {
-            if server_stream.set_nodelay(true).is_ok() {
+        Ok(result) => match result {
+            Ok(mut server_stream) => {
+                if let Err(e) = server_stream.set_nodelay(true) {
+                    warn!("Error setting nodelay on stream, {e}");
+                    return;
+                }
+
                 info!("Connected to server, server_id={server_id}, request_id={request_id}");
-                process_request(request_id, request, ekilibri_stream, &mut server_stream).await;
+
+                match process_request(
+                    request_id,
+                    request,
+                    ekilibri_stream,
+                    &mut server_stream,
+                    config,
+                )
+                .await
+                {
+                    Ok(()) => return,
+                    Err(e) => match e {
+                        ProcessingError::ReadTimeout | ProcessingError::WriteTimeout => {
+                            format!("{HTTP_VERSION} 504 Gateway Time-out{CRLF}{CRLF}")
+                        }
+                    },
+                }
             }
-        }
+            Err(e) => {
+                warn!(
+                    "Can't connect to server, server_id={server_id}, request_id={request_id}. {e}"
+                );
+                format!("{HTTP_VERSION} 502 Bad Gateway{CRLF}{CRLF}")
+            }
+        },
         Err(e) => {
-            warn!("Can't connect to server, server_id={server_id}, request_id={request_id}. {e}");
-            let response = format!("{HTTP_VERSION} 502 Bad Gateway{CRLF}{CRLF}");
-            if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
-                trace!("Error sending response to client, request_id={request_id}, {e}")
-            }
+            warn!("Can't connect to server, connection timed out, server_id={server_id}, request_id={request_id}. {e}");
+            format!("{HTTP_VERSION} 504 Gateway Time-out{CRLF}{CRLF}")
         }
+    };
+
+    if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
+        trace!("Error sending response to client, request_id={request_id}, {e}")
     }
 
     counter.fetch_sub(1, Ordering::Relaxed);
 }
 
-// TODO: Consider configuration timeouts.
+#[derive(Error, Debug)]
+enum ProcessingError {
+    #[error("Request timed out while waiting for the server response")]
+    ReadTimeout,
+    #[error("Request timed out while sending the request to the server")]
+    WriteTimeout,
+}
+
 /// Takes the [request] data and send it to the chosen server.
 async fn process_request(
     request_id: Uuid,
     request: Vec<u8>,
     ekilibri_stream: &mut TcpStream,
     server_stream: &mut TcpStream,
-) {
-    match server_stream.write_all(&request).await {
-        Ok(()) => {
-            trace!("Successfully sent client data to server, request_id={request_id}")
-        }
+    config: Arc<Config>,
+) -> Result<(), ProcessingError> {
+    match timeout(
+        Duration::from_millis(config.write_timeout as u64),
+        server_stream.write_all(&request),
+    )
+    .await
+    {
+        Ok(result) => match result {
+            Ok(()) => trace!("Successfully sent client data to server, request_id={request_id}"),
+            Err(e) => {
+                trace!("Unable to send client data to server, request_id={request_id}, {e}");
+                return Ok(());
+            }
+        },
         Err(e) => {
-            trace!("Unable to send client data to server, request_id={request_id}, {e}");
-            return;
+            trace!("Timeout sending request request to server, request_id={request_id}, {e}");
+            return Err(ProcessingError::WriteTimeout);
         }
     }
 
@@ -252,16 +300,27 @@ async fn process_request(
             buf.resize(cursor * 2, 0);
         }
 
-        let bytes_read = match server_stream.read(&mut buf[cursor..]).await {
-            Ok(size) => {
-                trace!(
+        let bytes_read = match timeout(
+            Duration::from_millis(config.read_timeout as u64),
+            server_stream.read(&mut buf[cursor..]),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(size) => {
+                    trace!(
                 "Successfully read data from server stream, size={size}, request_id={request_id}"
                 );
-                size
-            }
-            Err(_) => {
-                trace!("Unable to read data from server stream, request_id={request_id}");
-                0
+                    size
+                }
+                Err(e) => {
+                    trace!("Unable to read data from server stream, request_id={request_id}, {e}");
+                    0
+                }
+            },
+            Err(e) => {
+                trace!("Read request timed out, request_id={request_id}, error={e}");
+                return Err(ProcessingError::ReadTimeout);
             }
         };
 
@@ -280,6 +339,8 @@ async fn process_request(
             trace!("Unable to send server data to client, request_id={request_id}, {e}");
         }
     }
+
+    Ok(())
 }
 
 #[derive(Error, Debug)]
