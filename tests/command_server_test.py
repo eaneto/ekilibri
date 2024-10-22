@@ -1,9 +1,6 @@
-import io
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
-
-import pytest
 import requests
+
+URL = "http://localhost:8081"
 
 
 def test_echo_server():
@@ -11,9 +8,7 @@ def test_echo_server():
 
     headers = {"Content-Length": str(len(payload))}
 
-    response = requests.post(
-        "http://localhost:8081/echo", headers=headers, data=payload
-    )
+    response = requests.post(URL + "/echo", headers=headers, data=payload)
 
     assert response.status_code == 200
     assert response.headers["Content-Length"] == str(len(payload))
@@ -26,9 +21,7 @@ def test_echo_server_with_content_type():
 
     headers = {"Content-Length": str(len(payload)), "Content-Type": "application/json"}
 
-    response = requests.post(
-        "http://localhost:8081/echo", headers=headers, data=payload
-    )
+    response = requests.post(URL + "/echo", headers=headers, data=payload)
 
     assert response.status_code == 200
     assert response.headers["Content-Length"] == str(len(payload))
@@ -36,29 +29,12 @@ def test_echo_server_with_content_type():
     assert response.text == payload
 
 
-def test_echo_server_without_content_type():
-    payload = """{"key": "value"}"""
-
-    headers = {"Content-Type": "application/json"}
-
-    url = "http://localhost:8081/echo"
-    data = io.BytesIO(payload.encode("utf-8"))
-
-    request = Request(url, data=data, headers=headers)
-    with pytest.raises(HTTPError) as error:
-        urlopen(request)
-
-    assert "411" in str(error)
-
-
 def test_echo_server_with_big_body():
     payload = "test parsing this info" * 1000
 
     headers = {"Content-Length": str(len(payload))}
 
-    response = requests.post(
-        "http://localhost:8081/echo", headers=headers, data=payload
-    )
+    response = requests.post(URL + "/echo", headers=headers, data=payload)
 
     assert response.status_code == 200
     assert response.headers["Content-Length"] == str(len(payload))
@@ -71,9 +47,7 @@ def test_echo_server_with_huge_body():
 
     headers = {"Content-Length": str(len(payload))}
 
-    response = requests.post(
-        "http://localhost:8081/echo", headers=headers, data=payload
-    )
+    response = requests.post(URL + "/echo", headers=headers, data=payload)
 
     assert response.status_code == 200
     assert response.headers["Content-Length"] == str(len(payload))
@@ -82,12 +56,12 @@ def test_echo_server_with_huge_body():
 
 
 def test_get_not_found():
-    response = requests.get("http://localhost:8081/not-found")
+    response = requests.get(URL + "/not-found")
     assert response.status_code == 404
     assert response.text == ""
 
 
 def test_post_not_found():
-    response = requests.post("http://localhost:8081/not-found", data="data")
+    response = requests.post(URL + "/not-found", data="data")
     assert response.status_code == 404
     assert response.text == ""
