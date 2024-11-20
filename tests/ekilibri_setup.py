@@ -35,16 +35,14 @@ def kill_process(pid):
 
 def setup_ekilibri_server(request, config_path: str) -> int:
     profile = request.config.getoption("--profile")
-    attach_logs = request.config.getoption("--attach-logs")
     if request.config.getoption("--setup-server") == "true":
-        return initialize_ekilibri_server(profile, attach_logs, config_path)
+        return initialize_ekilibri_server(profile, config_path)
     else:
         return -1
 
 
 def initialize_ekilibri_server(
     profile: str,
-    attach_logs: str,
     config_path: str,
     port: int = 8080,
     args: Optional[str] = None,
@@ -56,12 +54,7 @@ def initialize_ekilibri_server(
     command = [binary, "-f", config_path]
     if args is not None:
         command.extend(args.split(" "))
-    if attach_logs == "true":
-        process = subprocess.Popen(command)
-    else:
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     time.sleep(0.1)
     return process.pid
 

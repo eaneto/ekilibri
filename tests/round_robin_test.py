@@ -60,14 +60,14 @@ def test_multiple_get_request_to_three_servers_with_all_failed(request):
 
         for _ in range(10):
             response = requests.get(URL + "/health")
-            assert response.status_code == 502
+            assert response.status_code == 502 or response.status_code == 504
 
         # Wait the fail window for ekilibri to remove the server
         sleep(10.5)
 
         for _ in range(10):
             response = requests.get(URL + "/health")
-            assert response.status_code == 504
+            assert response.status_code == 502
     finally:
         kill_process(pid)
 

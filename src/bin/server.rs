@@ -1,7 +1,8 @@
-use ekilibri::http::{parse_request, ParsingError, CRLF, HTTP_VERSION};
+use ekilibri::http::{self, parse_request, parse_response, ParsingError, CRLF, HTTP_VERSION};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
+    io,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -11,14 +12,16 @@ use std::{
 use thiserror::Error;
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::RwLock,
+    sync::{mpsc, RwLock},
     time::{timeout, Instant},
 };
 
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
+
+use ekilibri::pool::{Connection, ConnectionPool};
 
 use clap::Parser;
 
@@ -49,13 +52,15 @@ struct Config {
     fail_window: u16,
     /// Timeout to establish a connection to one of the servers (in
     /// milliseconds).
-    connection_timeout: u32,
+    connection_timeout: u64,
     /// Timeout writing the data to the server (in milliseconds).
     write_timeout: u32,
     /// Timeout reading the data to the server (in milliseconds).
-    read_timeout: u32,
+    read_timeout: u64,
     /// The path to check the server's health. Ex.: "/health".
     health_check_path: String,
+    /// The maximum number of connections to have in the connection pool.
+    pool_size: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -106,13 +111,37 @@ async fn main() {
             .insert(id as u8, server.clone());
     }
 
+    let connection_pools = Arc::new(RwLock::new(Vec::with_capacity(config.servers.capacity())));
+    for (id, server) in config.servers.iter().enumerate() {
+        let (sender, receiver) = mpsc::channel::<Connection>(config.pool_size);
+        connection_pools.write().await.push(ConnectionPool::new(
+            id,
+            config.pool_size,
+            config.connection_timeout,
+            server,
+            sender,
+            receiver,
+        ));
+        connection_pools.read().await[id]
+            .establish_connections()
+            .await;
+    }
+
     let healthy_servers_clone = Arc::clone(&healthy_servers);
     let config_clone = Arc::clone(&config);
+    let pools_clone = Arc::clone(&connection_pools);
     tokio::spawn(async move {
-        check_servers_health(config_clone, healthy_servers_clone).await;
+        check_servers_health(config_clone, healthy_servers_clone, pools_clone).await;
     });
 
-    accept_and_handle_connections(listener, connections_counters, config, healthy_servers).await;
+    accept_and_handle_connections(
+        listener,
+        connections_counters,
+        config,
+        healthy_servers,
+        connection_pools,
+    )
+    .await;
 }
 
 async fn accept_and_handle_connections(
@@ -120,12 +149,14 @@ async fn accept_and_handle_connections(
     connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
     config: Arc<Config>,
     healthy_servers: HealthyServers,
+    connection_pools: Arc<RwLock<Vec<ConnectionPool>>>,
 ) {
     loop {
         match listener.accept().await {
             Ok((mut ekilibri_stream, _)) => {
                 let healthy_servers = Arc::clone(&healthy_servers);
                 let connections_counters = Arc::clone(&connections_counters);
+                let pools_clone = Arc::clone(&connection_pools);
                 let config = Arc::clone(&config);
                 tokio::spawn(async move {
                     handle_connection(
@@ -133,6 +164,7 @@ async fn accept_and_handle_connections(
                         healthy_servers,
                         connections_counters,
                         &mut ekilibri_stream,
+                        pools_clone,
                     )
                     .await;
                 });
@@ -147,10 +179,11 @@ async fn handle_connection(
     healthy_servers: HealthyServers,
     connections_counters: Arc<RwLock<Vec<AtomicU64>>>,
     ekilibri_stream: &mut TcpStream,
+    pools: Arc<RwLock<Vec<ConnectionPool>>>,
 ) {
     let request_id = Uuid::new_v4();
     let request = match parse_request(&request_id, ekilibri_stream).await {
-        Ok((_, raw_request)) => raw_request,
+        Ok(request) => request,
         Err(e) => {
             warn!(
                 "There was an error while parsing the request, request_id={request_id}, error={e}"
@@ -180,19 +213,19 @@ async fn handle_connection(
         Ok(id) => id,
         Err(e) => {
             let response = match e {
-                RequestError::NoHealthyServer => {
-                    format!("{HTTP_VERSION} 504 Gateway Time-out{CRLF}{CRLF}")
-                }
+                RequestError::NoHealthyServer => http::Response::new(502),
             };
             warn!(
                 "Error choosing a possible server to route request, request_id={request_id}, error={e}"
             );
-            if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
-                trace!("Error sending response to client, request_id={request_id}, {e}")
+            if let Err(e) = ekilibri_stream.write_all(&response.as_bytes()).await {
+                error!("Error sending response to client, request_id={request_id}, {e}")
             }
             return;
         }
     };
+
+    debug!("Server {server_id} chosen for routing");
 
     let counters = connections_counters.read().await;
     let counter = counters
@@ -200,147 +233,155 @@ async fn handle_connection(
         .expect("The counters should be initialized with every possible server_id at this point");
     counter.fetch_add(1, Ordering::Relaxed);
 
-    let response = match timeout(
-        Duration::from_millis(config.connection_timeout as u64),
-        TcpStream::connect(
-            config
-                .servers
-                .get(server_id)
-                .expect("The strategy functions should return a possible server_id at this point"),
-        ),
-    )
-    .await
-    {
-        Ok(result) => match result {
-            Ok(mut server_stream) => {
-                if let Err(e) = server_stream.set_nodelay(true) {
-                    warn!("Error setting nodelay on stream, {e}");
-                    return;
-                }
+    let pools_lock = pools.read().await;
+    let pool = pools_lock
+        .get(server_id)
+        .expect("There should be a pool of connections initialized for each server");
 
-                info!("Connected to server, server_id={server_id}, request_id={request_id}");
+    let response = match pool.get_connection().await {
+        Ok(mut connection) => {
+            info!("Connected to server, server_id={server_id}, request_id={request_id}");
 
-                match process_request(
-                    request_id,
-                    request,
-                    ekilibri_stream,
-                    &mut server_stream,
-                    config,
-                )
-                .await
-                {
-                    Ok(()) => return,
-                    Err(e) => match e {
-                        ProcessingError::ReadTimeout | ProcessingError::WriteTimeout => {
-                            format!("{HTTP_VERSION} 504 Gateway Time-out{CRLF}{CRLF}")
+            match process_request(request_id, request, &mut connection.stream, config).await {
+                Ok(response) => {
+                    let connection_header = response.headers.get("connection");
+                    let connection_header = match connection_header {
+                        Some(connection_header) => match connection_header.as_str() {
+                            "keep-alive" => http::ConnectionHeader::KeepAlive,
+                            "close" => http::ConnectionHeader::Close,
+                            _ => http::ConnectionHeader::Close,
+                        },
+                        None => http::ConnectionHeader::KeepAlive,
+                    };
+
+                    match connection_header {
+                        http::ConnectionHeader::KeepAlive => {
+                            pool.return_connection(connection).await
                         }
-                    },
+                        http::ConnectionHeader::Close => {
+                            let pools_clone = Arc::clone(&pools);
+                            reconnect_in_background(connection, server_id, pools_clone).await;
+                        }
+                    }
+
+                    response
+                }
+                Err(e) => {
+                    warn!("Error processing the request, server_id={server_id}, request_id={request_id}. {e}");
+                    match e {
+                        // If there was a timeout error the response will still be sent to the connection in the pool,
+                        // but the client won't ever receive it, if nothing is done the next request will have to
+                        // read the response from the previous connection before sending the request. To make sure this
+                        // is not needed, given that the next request may arrive before the response of the initial
+                        // request, the connection is closed and a new one is opened, this is done in background so
+                        // that the client won't have to wait for the new connection to be established.
+                        ProcessingError::WriteTimeout => {
+                            let pools_clone = Arc::clone(&pools);
+                            reconnect_in_background(connection, server_id, pools_clone).await;
+                            http::Response::new(504)
+                        }
+                        ProcessingError::UnableToSendRequest(_) => {
+                            pool.return_connection(connection).await;
+                            http::Response::new(502)
+                        }
+                        ProcessingError::ParsingError(why) => match why {
+                            ParsingError::UnableToRead => http::Response::new(502),
+                            ParsingError::ReadTimeout => {
+                                let pools_clone = Arc::clone(&pools);
+                                reconnect_in_background(connection, server_id, pools_clone).await;
+                                http::Response::new(504)
+                            }
+                            _ => {
+                                warn!("Unwrapped error, server_id={server_id}, request_id={request_id}. {why}");
+                                http::Response::new(400)
+                            }
+                        },
+                    }
                 }
             }
-            Err(e) => {
+        }
+        Err(e) => match e.kind() {
+            io::ErrorKind::TimedOut => {
+                warn!("Can't connect to server, connection timed out, server_id={server_id}, request_id={request_id}.");
+                http::Response::new(504)
+            }
+            _ => {
                 warn!(
                     "Can't connect to server, server_id={server_id}, request_id={request_id}. {e}"
                 );
-                format!("{HTTP_VERSION} 502 Bad Gateway{CRLF}{CRLF}")
+                http::Response::new(502)
             }
         },
-        Err(e) => {
-            warn!("Can't connect to server, connection timed out, server_id={server_id}, request_id={request_id}. {e}");
-            format!("{HTTP_VERSION} 504 Gateway Time-out{CRLF}{CRLF}")
-        }
     };
 
-    if let Err(e) = ekilibri_stream.write_all(response.as_bytes()).await {
-        trace!("Error sending response to client, request_id={request_id}, {e}")
+    if let Err(e) = ekilibri_stream.write_all(&response.as_bytes()).await {
+        error!("Error sending response to client, request_id={request_id}, {e}")
     }
 
     counter.fetch_sub(1, Ordering::Relaxed);
 }
 
+async fn reconnect_in_background(
+    connection: Connection,
+    server_id: usize,
+    pools: Arc<RwLock<Vec<ConnectionPool>>>,
+) {
+    tokio::spawn(async move {
+        drop(connection);
+        let pools_lock = pools.read().await;
+        let pool = pools_lock
+            .get(server_id)
+            .expect("There should be a pool of connections initialized for each server");
+        match pool.create_connection(pool.is_reconnecting()).await {
+            Ok(connection) => pool.send_connection(connection).await,
+            Err(e) => {
+                warn!(
+                    "Failed to create a new connection in the pool during reconnection. server_id={server_id}, error={e}"
+                );
+            }
+        }
+    });
+}
+
 #[derive(Error, Debug)]
 enum ProcessingError {
-    #[error("Request timed out while waiting for the server response")]
-    ReadTimeout,
     #[error("Request timed out while sending the request to the server")]
     WriteTimeout,
+    #[error("Unable to send the request to the server")]
+    UnableToSendRequest(#[from] io::Error),
+    #[error("Parsing error: {0}")]
+    ParsingError(#[from] http::ParsingError),
 }
 
 /// Takes the [request] data and send it to the chosen server.
 async fn process_request(
     request_id: Uuid,
-    request: Vec<u8>,
-    ekilibri_stream: &mut TcpStream,
+    request: http::Request,
     server_stream: &mut TcpStream,
     config: Arc<Config>,
-) -> Result<(), ProcessingError> {
+) -> Result<http::Response, ProcessingError> {
     match timeout(
         Duration::from_millis(config.write_timeout as u64),
-        server_stream.write_all(&request),
+        server_stream.write_all(&request.as_bytes()),
     )
     .await
     {
         Ok(result) => match result {
-            Ok(()) => trace!("Successfully sent client data to server, request_id={request_id}"),
+            Ok(()) => trace!("Successfully sent request o server, request_id={request_id}"),
             Err(e) => {
-                trace!("Unable to send client data to server, request_id={request_id}, {e}");
-                return Ok(());
+                error!("Unable to send request to server, request_id={request_id}, {e}");
+                return Err(ProcessingError::UnableToSendRequest(e));
             }
         },
         Err(e) => {
-            trace!("Timeout sending request request to server, request_id={request_id}, {e}");
+            error!("Timeout sending request to server, request_id={request_id}, {e}");
             return Err(ProcessingError::WriteTimeout);
         }
     }
 
-    // Reply client with same response from server
-    let mut cursor = 0;
-    let mut buf = vec![0_u8; 4096];
-    loop {
-        if buf.len() == cursor {
-            buf.resize(cursor * 2, 0);
-        }
+    let response = parse_response(server_stream, config.read_timeout).await?;
 
-        let bytes_read = match timeout(
-            Duration::from_millis(config.read_timeout as u64),
-            server_stream.read(&mut buf[cursor..]),
-        )
-        .await
-        {
-            Ok(result) => match result {
-                Ok(size) => {
-                    trace!(
-                "Successfully read data from server stream, size={size}, request_id={request_id}"
-                );
-                    size
-                }
-                Err(e) => {
-                    trace!("Unable to read data from server stream, request_id={request_id}, {e}");
-                    0
-                }
-            },
-            Err(e) => {
-                trace!("Read request timed out, request_id={request_id}, error={e}");
-                return Err(ProcessingError::ReadTimeout);
-            }
-        };
-
-        cursor += bytes_read;
-
-        if bytes_read == 0 || cursor < buf.len() {
-            break;
-        }
-    }
-
-    match ekilibri_stream.write_all(&buf[..cursor]).await {
-        Ok(()) => {
-            trace!("Successfully sent server data to client, request_id={request_id}")
-        }
-        Err(e) => {
-            trace!("Unable to send server data to client, request_id={request_id}, {e}");
-        }
-    }
-
-    Ok(())
+    Ok(response)
 }
 
 #[derive(Error, Debug)]
@@ -412,7 +453,11 @@ async fn choose_server_least_connections(
 /// time window, the list may grow too much if there are multiple errors. This job
 /// also locks the error list, so the health check process can't insert an error
 /// while the GC job is running.
-async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServers) {
+async fn check_servers_health(
+    config: Arc<Config>,
+    healthy_servers: HealthyServers,
+    pools: Arc<RwLock<Vec<ConnectionPool>>>,
+) {
     let timeouts = Arc::new(RwLock::new(Vec::with_capacity(config.servers.len())));
     for _ in &config.servers {
         timeouts
@@ -446,8 +491,14 @@ async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServe
         }
     });
 
+    let mut request_template = format!("GET {} {HTTP_VERSION}{CRLF}", config.health_check_path);
+    request_template.push_str(&format!("Connection: keep-alive{CRLF}"));
+    request_template.push_str(&format!("Host: [server]{CRLF}"));
+    request_template.push_str(CRLF);
+
     loop {
         for (id, server) in config.servers.iter().enumerate() {
+            let pool = &pools.read().await[id];
             let idx = id as u8;
             let timeout_count = count_server_timeouts(&timeouts, id, config.fail_window).await;
 
@@ -457,37 +508,38 @@ async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServe
             {
                 let idx = id as u8;
                 healthy_servers.write().await.remove(&idx);
+                // If the server is unhealthy, all connections should be dropped and the pool should start creating new
+                // connections for each request.
+                pool.set_reconnect(true);
+                pool.drop_connections().await;
                 warn!("Server {server} is unhealthy, removing it from the list of healthy servers");
                 continue;
             }
 
-            // TODO: Create a connection pool so that connections
-            // don't need to be established every single call and the
-            // user can limit the amount of possible connections per
-            // server.
             let mut stream = match timeout(
-                Duration::from_millis(config.connection_timeout as u64),
-                TcpStream::connect(server),
+                Duration::from_millis(config.connection_timeout),
+                TcpStream::connect(&server),
             )
             .await
             {
                 Ok(result) => match result {
                     Ok(stream) => stream,
-                    Err(_) => {
+                    Err(e) => {
+                        warn!("Error while connecting to the server, {id} might be down, {e}",);
                         timeouts.read().await[id].write().await.push(Instant::now());
-                        warn!("Server {server} might be down");
                         continue;
                     }
                 },
                 Err(_) => {
+                    warn!("Connection timeout, server {id} might be down",);
                     timeouts.read().await[id].write().await.push(Instant::now());
-                    warn!("Timeout, server {server} might be down");
                     continue;
                 }
             };
+
+            let request = request_template.replace("[server]", server);
             // TODO: Timeout cancels the future, but write_all is
             // not cancellation safe. Will this be a problem?
-            let request = format!("GET {} {HTTP_VERSION}\r\n", config.health_check_path);
             match timeout(
                 Duration::from_millis(config.write_timeout as u64),
                 stream.write_all(request.as_bytes()),
@@ -495,45 +547,33 @@ async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServe
             .await
             {
                 Ok(result) => {
-                    if result.is_err() {
+                    if let Err(e) = result {
+                        warn!("Error sending request to server, {server} might be down, {e}");
                         timeouts.read().await[id].write().await.push(Instant::now());
-                        warn!("Server {server} might be down");
                         continue;
                     }
                 }
                 Err(_) => {
                     timeouts.read().await[id].write().await.push(Instant::now());
-                    warn!("Timeout, server {server} might be down");
+                    warn!("Write timeout, server {server} might be down");
                     continue;
                 }
             };
-            let mut buf = [0_u8; 12];
-            match timeout(
-                Duration::from_millis(config.read_timeout as u64),
-                stream.read(&mut buf),
-            )
-            .await
-            {
-                Ok(result) => {
-                    if result.is_err() {
-                        timeouts.read().await[id].write().await.push(Instant::now());
-                        warn!("Server {server} might be down");
-                        continue;
-                    }
-                }
-                Err(_) => {
+            let response = match parse_response(&mut stream, config.read_timeout).await {
+                Ok(response) => response,
+                Err(e) => {
                     timeouts.read().await[id].write().await.push(Instant::now());
-                    warn!("Timeout, server {server} might be down");
+                    warn!("Error reading response from server, {server} might be down, {e}");
                     continue;
                 }
             };
-            let response = String::from_utf8_lossy(&buf);
-            let ok_response = format!("{HTTP_VERSION} 200");
-            if response.starts_with(&ok_response) {
+
+            if response.status == 200 {
                 trace!("Everything is ok at {server}");
             } else {
                 timeouts.read().await[id].write().await.push(Instant::now());
-                warn!("Server {server} might be down");
+                warn!("Server {server} is not healthy");
+                debug!("server_response={:?}", response.body);
             }
 
             let idx = id as u8;
@@ -541,6 +581,11 @@ async fn check_servers_health(config: Arc<Config>, healthy_servers: HealthyServe
                 let timeout_count = count_server_timeouts(&timeouts, id, config.fail_window).await;
                 if timeout_count < config.max_fails {
                     healthy_servers.write().await.insert(idx, server.clone());
+                    // We assume that if there are any connections in the channel they are not valid
+                    // connections and should be dropped.
+                    pool.drop_connections().await;
+                    pool.establish_connections().await;
+                    pool.set_reconnect(false);
                     info!("Everything seems to be fine with server {server} now, re-added to the list of healthy servers");
                 }
             }

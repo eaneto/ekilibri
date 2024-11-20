@@ -10,3 +10,4 @@ connection_timeout = 1000
 write_timeout = 1000
 read_timeout = 1000
 health_check_path = "/sleep"
+pool_size = 10

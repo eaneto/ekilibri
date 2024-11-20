@@ -21,3 +21,5 @@ rand = "0.8.5"
 clap = { version = "4.5.16", features = ["derive"] }
 uuid = { version = "1.10.0", features = ["v4", "fast-rng"] }
 thiserror = "1.0.64"
+axum = "0.7.7"
+bytes = "1.8.0"
