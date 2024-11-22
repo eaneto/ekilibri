@@ -1,8 +1,10 @@
+import pytest
 import requests
 
 URL = "http://localhost:8081"
 
 
+@pytest.mark.command
 def test_echo_server():
     payload = "test parsing this info"
 
@@ -16,6 +18,7 @@ def test_echo_server():
     assert response.text == payload
 
 
+@pytest.mark.command
 def test_echo_server_with_content_type():
     payload = """{"key": "value"}"""
 
@@ -29,6 +32,7 @@ def test_echo_server_with_content_type():
     assert response.text == payload
 
 
+@pytest.mark.command
 def test_echo_server_with_big_body():
     payload = "test parsing this info" * 1000
 
@@ -42,6 +46,7 @@ def test_echo_server_with_big_body():
     assert response.text == payload
 
 
+@pytest.mark.command
 def test_echo_server_with_huge_body():
     payload = "test parsing this info" * 10000
 
@@ -55,12 +60,14 @@ def test_echo_server_with_huge_body():
     assert response.text == payload
 
 
+@pytest.mark.command
 def test_get_not_found():
     response = requests.get(URL + "/not-found")
     assert response.status_code == 404
     assert response.text == ""
 
 
+@pytest.mark.command
 def test_post_not_found():
     response = requests.post(URL + "/not-found", data="data")
     assert response.status_code == 404

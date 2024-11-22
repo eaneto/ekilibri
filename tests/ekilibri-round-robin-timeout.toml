@@ -4,8 +4,8 @@ servers = [
     "127.0.0.1:8083"
 ]
 strategy = "RoundRobin"
-max_fails = 5
-fail_window = 60
+max_fails = 1
+fail_window = 5
 connection_timeout = 1000
 write_timeout = 1000
 read_timeout = 1000

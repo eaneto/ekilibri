@@ -5,7 +5,7 @@ servers = [
 ]
 strategy = "LeastConnections"
 max_fails = 1
-fail_window = 10
+fail_window = 5
 connection_timeout = 1000
 write_timeout = 1000
 read_timeout = 1000

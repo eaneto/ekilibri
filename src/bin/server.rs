@@ -91,6 +91,10 @@ async fn main() {
 
     let config = Arc::new(config);
 
+    if config.pool_size == 0 {
+        panic!("Pool size has to be greater than zero.")
+    }
+
     let connections_counters = Arc::new(RwLock::new(Vec::with_capacity(config.servers.len())));
     for _ in &config.servers {
         connections_counters.write().await.push(AtomicU64::new(0));
