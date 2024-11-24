@@ -30,7 +30,7 @@ def initialize_command_server(
 def kill_process(pid):
     if pid != -1:
         os.kill(pid, signal.SIGTERM)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
 
 def setup_ekilibri_server(request, config_path: str) -> int:

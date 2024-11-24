@@ -3,11 +3,11 @@ servers = [
     "127.0.0.1:8082",
     "127.0.0.1:8083"
 ]
-strategy = "RoundRobin"
+strategy = "LeastConnections"
 max_fails = 1
 fail_window = 5
 connection_timeout = 1000
 write_timeout = 1000
 read_timeout = 1000
-health_check_path = "/health"
+health_check_path = "/sleep"
 pool_size = 10

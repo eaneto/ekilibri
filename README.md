@@ -8,9 +8,6 @@ load balancer.
 - Enhance HTTP parsing implementation, parse headers over 4kB, support
   chunked transfer, support all methods.
 - Enhance error handling making sure the server won't crash.
-- Write better tests cases, the ones written right now(can be found at
-  `tests` directory) only check basic things and there are only a few
-  crash scenarios.
 
 ## Features
 
