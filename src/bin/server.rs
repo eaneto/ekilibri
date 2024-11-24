@@ -40,15 +40,14 @@ struct Config {
     servers: Vec<String>,
     /// Load balancing strategy.
     strategy: Strategies,
-    /// Maximum number of failed requests(non 200 responses and
-    /// timeouts) allowed before a server is taken from the healthy
-    /// servers list. A server that is not on this list won't receive
-    /// any requests. The health check process runs once every 500ms.
+    /// Maximum number of failed requests(non 200 responses and timeouts)
+    /// allowed before a server is taken from the healthy servers list. A server
+    /// that is not on this list won't receive any requests. The health check
+    /// process runs once every 500ms.
     max_fails: u64,
-    /// The time window to consider the [Config::max_fails] and remove
-    /// a server from the healthy servers list, the time windows is
-    /// relevant so that "old" requests don't interfere in the
-    /// decision (in seconds).
+    /// The time window to consider the [Config::max_fails] and remove a server
+    /// from the healthy servers list, the time windows is relevant so that
+    /// "old" requests don't interfere in the decision (in seconds).
     fail_window: u16,
     /// Timeout to establish a connection to one of the servers (in
     /// milliseconds).
@@ -59,7 +58,8 @@ struct Config {
     read_timeout: u64,
     /// The path to check the server's health. Ex.: "/health".
     health_check_path: String,
-    /// The maximum number of connections to have in the connection pool.
+    /// The number of connections to have in the connection pool for each server
+    /// in the servers list.
     pool_size: usize,
 }
 
@@ -333,17 +333,11 @@ async fn reconnect_in_background(
     tokio::spawn(async move {
         drop(connection);
         let pools_lock = pools.read().await;
-        let pool = pools_lock
+        pools_lock
             .get(server_id)
-            .expect("There should be a pool of connections initialized for each server");
-        match pool.create_connection(pool.is_reconnecting()).await {
-            Ok(connection) => pool.send_connection(connection).await,
-            Err(e) => {
-                warn!(
-                    "Failed to create a new connection in the pool during reconnection. server_id={server_id}, error={e}"
-                );
-            }
-        }
+            .expect("There should be a pool of connections initialized for each server")
+            .create_connection()
+            .await;
     });
 }
 
@@ -514,8 +508,7 @@ async fn check_servers_health(
                 healthy_servers.write().await.remove(&idx);
                 // If the server is unhealthy, all connections should be dropped and the pool should start creating new
                 // connections for each request.
-                pool.set_reconnect(true);
-                pool.drop_connections().await;
+                pool.active_reconnection().await;
                 warn!("Server {server} is unhealthy, removing it from the list of healthy servers");
                 continue;
             }
@@ -585,11 +578,7 @@ async fn check_servers_health(
                 let timeout_count = count_server_timeouts(&timeouts, id, config.fail_window).await;
                 if timeout_count < config.max_fails {
                     healthy_servers.write().await.insert(idx, server.clone());
-                    // We assume that if there are any connections in the channel they are not valid
-                    // connections and should be dropped.
-                    pool.drop_connections().await;
-                    pool.establish_connections().await;
-                    pool.set_reconnect(false);
+                    pool.deactive_reconnection().await;
                     info!("Everything seems to be fine with server {server} now, re-added to the list of healthy servers");
                 }
             }

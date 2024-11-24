@@ -88,6 +88,10 @@ read_timeout = 1000
 
 # The path to check the server's health. Ex.: "/health".
 health_check_path = "/health"
+
+# The number of connections to have in the connection pool for
+# each server in the servers list.
+pool_size = 10
 ```
 
 ## Problems
