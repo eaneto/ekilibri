@@ -34,6 +34,7 @@ impl Request {
 
 pub struct Response {
     pub status: u16,
+    _reason: String,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
     bytes: Bytes,
@@ -55,6 +56,7 @@ impl Response {
 
         Response {
             status,
+            _reason: reason.to_string(),
             headers: HashMap::new(),
             body: None,
             bytes,
@@ -254,6 +256,7 @@ pub async fn parse_response(
                 Some(protocol) => protocol.to_string(),
                 None => return Err(ParsingError::MalformedRequest),
             };
+            // TODO: Make sure status is valid
             status = match request_line.next() {
                 Some(status) => match status.parse::<u16>() {
                     Ok(status) => status,
@@ -261,10 +264,10 @@ pub async fn parse_response(
                 },
                 None => return Err(ParsingError::MalformedRequest),
             };
-            // FIXME: Skipping spaces
             for response_reason in request_line {
-                reason.push_str(response_reason);
+                reason.push_str(&format!("{response_reason} "));
             }
+            reason = reason.trim_end().to_string();
             cursor_position = i + 2;
             break;
         }
@@ -282,6 +285,7 @@ pub async fn parse_response(
         None => {
             return Ok(Response {
                 status,
+                _reason: reason,
                 headers,
                 body,
                 bytes: Bytes::copy_from_slice(&buf),
@@ -333,6 +337,7 @@ pub async fn parse_response(
 
     Ok(Response {
         status,
+        _reason: reason,
         headers,
         body,
         bytes: Bytes::copy_from_slice(&buf),
