@@ -41,7 +41,25 @@ pub struct Response {
 }
 
 impl Response {
-    pub fn new(status: u16) -> Response {
+    #[must_use]
+    pub fn new(
+        status: u16,
+        reason: String,
+        headers: HashMap<String, String>,
+        body: Option<String>,
+        bytes: Bytes,
+    ) -> Response {
+        Response {
+            status,
+            _reason: reason,
+            headers,
+            body,
+            bytes,
+        }
+    }
+
+    #[must_use]
+    pub fn from_status(status: u16) -> Response {
         let reason = match status {
             400 => "Bad Request",
             411 => "Length Required",
@@ -54,13 +72,7 @@ impl Response {
         let status_line = format!("{HTTP_VERSION} {status} {reason}{CRLF}{CRLF}");
         let bytes = Bytes::from(status_line);
 
-        Response {
-            status,
-            _reason: reason.to_string(),
-            headers: HashMap::new(),
-            body: None,
-            bytes,
-        }
+        Response::new(status, reason.to_string(), HashMap::new(), None, bytes)
     }
 
     pub fn as_bytes(&self) -> Bytes {
@@ -97,6 +109,12 @@ pub enum ParsingError {
     MalformedResponse,
 }
 
+/// Parses a HTTP request from a given connection.
+///
+/// # Errors
+///
+/// There are multiple errors that could happen while parsing the request, they
+/// are all documented under [`ParsingError`].
 pub async fn parse_request(
     request_id: &uuid::Uuid,
     stream: &mut TcpStream,
@@ -156,14 +174,12 @@ pub async fn parse_request(
 
     // content-length should be required if method is post:
     let final_cursor_position = if method == Method::Post {
-        let content_length = match headers.get("content-length") {
-            Some(length) => length,
-            None => return Err(ParsingError::MissingContentLength),
+        let Some(content_length) = headers.get("content-length") else {
+            return Err(ParsingError::MissingContentLength);
         };
 
-        let content_length = match content_length.parse::<u32>() {
-            Ok(length) => length,
-            Err(_) => return Err(ParsingError::InvalidContentLength),
+        let Ok(content_length) = content_length.parse::<u32>() else {
+            return Err(ParsingError::InvalidContentLength);
         };
 
         if bytes_read - cursor_position >= content_length as usize {
@@ -214,6 +230,12 @@ pub async fn parse_request(
     })
 }
 
+/// Parses a HTTP response from a given connection.
+///
+/// # Errors
+///
+/// There are multiple errors that could happen while parsing the response, they
+/// are all documented under [`ParsingError`].
 pub async fn parse_response(
     stream: &mut TcpStream,
     read_timeout_ms: u64,
@@ -224,23 +246,22 @@ pub async fn parse_response(
     let mut body: Option<String> = None;
 
     let mut buf = vec![0u8; 4096];
-    let bytes_read = match timeout(
+    let bytes_read = if let Ok(result) = timeout(
         Duration::from_millis(read_timeout_ms),
         stream.read(&mut buf),
     )
     .await
     {
-        Ok(result) => match result {
+        match result {
             Ok(size) => size,
             Err(e) => {
                 debug!("Error reading TCP stream to parse command, error={e}");
                 0
             }
-        },
-        Err(_) => {
-            debug!("Time out reading response");
-            return Err(ParsingError::ReadTimeout);
         }
+    } else {
+        debug!("Time out reading response");
+        return Err(ParsingError::ReadTimeout);
     };
 
     if bytes_read == 0 {
@@ -280,22 +301,18 @@ pub async fn parse_response(
     let (headers, position) = parse_headers(&buf, cursor_position)?;
     cursor_position = position;
 
-    let content_length = match headers.get("content-length") {
-        Some(length) => length,
-        None => {
-            return Ok(Response {
-                status,
-                _reason: reason,
-                headers,
-                body,
-                bytes: Bytes::copy_from_slice(&buf),
-            });
-        }
+    let Some(content_length) = headers.get("content-length") else {
+        return Ok(Response::new(
+            status,
+            reason,
+            headers,
+            body,
+            Bytes::copy_from_slice(&buf),
+        ));
     };
 
-    let content_length = match content_length.parse::<u32>() {
-        Ok(length) => length,
-        Err(_) => return Err(ParsingError::InvalidContentLength),
+    let Ok(content_length) = content_length.parse::<u32>() else {
+        return Err(ParsingError::InvalidContentLength);
     };
 
     let mut body_cursor = bytes_read;
@@ -306,23 +323,22 @@ pub async fn parse_response(
             buf.resize(body_cursor * 2, 0);
         }
 
-        let current_bytes_read = match timeout(
+        let current_bytes_read = if let Ok(result) = timeout(
             Duration::from_millis(read_timeout_ms),
             stream.read(&mut buf[body_cursor..]),
         )
         .await
         {
-            Ok(result) => match result {
+            match result {
                 Ok(size) => size,
                 Err(e) => {
                     debug!("Error reading TCP stream to parse command, error={e}");
                     0
                 }
-            },
-            Err(_) => {
-                debug!("Time out reading response");
-                return Err(ParsingError::ReadTimeout);
             }
+        } else {
+            debug!("Time out reading response");
+            return Err(ParsingError::ReadTimeout);
         };
 
         if bytes_read == 0 {
@@ -335,13 +351,13 @@ pub async fn parse_response(
 
     body = Some(String::from_utf8_lossy(&buf[cursor_position..]).to_string());
 
-    Ok(Response {
+    Ok(Response::new(
         status,
-        _reason: reason,
+        reason,
         headers,
         body,
-        bytes: Bytes::copy_from_slice(&buf),
-    })
+        Bytes::copy_from_slice(&buf),
+    ))
 }
 
 fn parse_headers(
@@ -356,7 +372,7 @@ fn parse_headers(
             if header_line.is_empty() {
                 break;
             }
-            let header_line = header_line.split_once(":");
+            let header_line = header_line.split_once(':');
             let (key, value) = match header_line {
                 Some((key, value)) => {
                     if key.is_empty() || value.is_empty() {

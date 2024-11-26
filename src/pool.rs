@@ -57,6 +57,7 @@ pub struct ConnectionPool {
 }
 
 impl ConnectionPool {
+    #[must_use]
     pub fn new(
         id: usize,
         size: usize,
@@ -99,7 +100,7 @@ impl ConnectionPool {
             match self.establish_connection(false).await {
                 Ok(connection) => self.send_connection(connection).await,
                 Err(e) => {
-                    warn!("Error establishing connection in the pool, error={e}")
+                    warn!("Error establishing connection in the pool, error={e}");
                 }
             }
         }
@@ -132,6 +133,10 @@ impl ConnectionPool {
 
     /// Returns the connection to the pool or drops the connection if the pool
     /// was at the reconnect state when the connection was acquired.
+    ///
+    /// # Panics
+    ///
+    /// If the channel is closed it's assumed that the server need a restart, so it panics.
     pub async fn return_connection(&self, connection: Connection) {
         if !connection.should_drop() {
             trace!("Returning connection to the pool");
@@ -158,6 +163,10 @@ impl ConnectionPool {
     }
 
     /// Sends a new [connection] to the internal channel.
+    ///
+    /// # Panics
+    ///
+    /// If the channel is closed it's assumed that the server need a restart, so it panics.
     async fn send_connection(&self, connection: Connection) {
         self.sender
             .send(connection)
@@ -172,7 +181,7 @@ impl ConnectionPool {
     ///
     /// # Errors
     ///
-    /// Any I/O error that might happen in the [TcpStream::connect] call is
+    /// Any I/O error that might happen in the [`TcpStream::connect`] call is
     /// returned, and timeout from [timeout].
     async fn establish_connection(&self, reconnecting: bool) -> Result<Connection, io::Error> {
         match timeout(self.timeout, TcpStream::connect(&self.server_address)).await {

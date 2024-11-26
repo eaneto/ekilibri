@@ -45,7 +45,7 @@ struct Config {
     /// that is not on this list won't receive any requests. The health check
     /// process runs once every 500ms.
     max_fails: u64,
-    /// The time window to consider the [Config::max_fails] and remove a server
+    /// The time window to consider the [`Config::max_fails`] and remove a server
     /// from the healthy servers list, the time windows is relevant so that
     /// "old" requests don't interfere in the decision (in seconds).
     fail_window: u16,
@@ -53,7 +53,7 @@ struct Config {
     /// milliseconds).
     connection_timeout: u64,
     /// Timeout writing the data to the server (in milliseconds).
-    write_timeout: u32,
+    write_timeout: u64,
     /// Timeout reading the data to the server (in milliseconds).
     read_timeout: u64,
     /// The path to check the server's health. Ex.: "/health".
@@ -91,9 +91,10 @@ async fn main() {
 
     let config = Arc::new(config);
 
-    if config.pool_size == 0 {
-        panic!("Pool size has to be greater than zero.")
-    }
+    assert!(
+        config.pool_size > 0,
+        "Pool size has to be greater than zero."
+    );
 
     let connections_counters = Arc::new(RwLock::new(Vec::with_capacity(config.servers.len())));
     for _ in &config.servers {
@@ -102,7 +103,7 @@ async fn main() {
 
     let listener = match TcpListener::bind("127.0.0.1:8080").await {
         Ok(listener) => listener,
-        Err(e) => panic!("Unable to start ekilibri on port 8080. Error = {:?}", e),
+        Err(e) => panic!("Unable to start ekilibri on port 8080. Error = {e:?}"),
     };
 
     info!("Ekilibri listening at port 8080");
@@ -217,13 +218,13 @@ async fn handle_connection(
         Ok(id) => id,
         Err(e) => {
             let response = match e {
-                RequestError::NoHealthyServer => http::Response::new(502),
+                RequestError::NoHealthyServer => http::Response::from_status(502),
             };
             warn!(
                 "Error choosing a possible server to route request, request_id={request_id}, error={e}"
             );
             if let Err(e) = ekilibri_stream.write_all(&response.as_bytes()).await {
-                error!("Error sending response to client, request_id={request_id}, {e}")
+                error!("Error sending response to client, request_id={request_id}, error={e}");
             }
             return;
         }
@@ -252,7 +253,6 @@ async fn handle_connection(
                     let connection_header = match connection_header {
                         Some(connection_header) => match connection_header.as_str() {
                             "keep-alive" => http::ConnectionHeader::KeepAlive,
-                            "close" => http::ConnectionHeader::Close,
                             _ => http::ConnectionHeader::Close,
                         },
                         None => http::ConnectionHeader::KeepAlive,
@@ -260,11 +260,11 @@ async fn handle_connection(
 
                     match connection_header {
                         http::ConnectionHeader::KeepAlive => {
-                            pool.return_connection(connection).await
+                            pool.return_connection(connection).await;
                         }
                         http::ConnectionHeader::Close => {
                             let pools_clone = Arc::clone(&pools);
-                            reconnect_in_background(connection, server_id, pools_clone).await;
+                            reconnect_in_background(connection, server_id, pools_clone);
                         }
                     }
 
@@ -281,51 +281,50 @@ async fn handle_connection(
                         // that the client won't have to wait for the new connection to be established.
                         ProcessingError::WriteTimeout => {
                             let pools_clone = Arc::clone(&pools);
-                            reconnect_in_background(connection, server_id, pools_clone).await;
-                            http::Response::new(504)
+                            reconnect_in_background(connection, server_id, pools_clone);
+                            http::Response::from_status(504)
                         }
                         ProcessingError::UnableToSendRequest(_) => {
                             pool.return_connection(connection).await;
-                            http::Response::new(502)
+                            http::Response::from_status(502)
                         }
                         ProcessingError::ParsingError(why) => match why {
-                            ParsingError::UnableToRead => http::Response::new(502),
+                            ParsingError::UnableToRead => http::Response::from_status(502),
                             ParsingError::ReadTimeout => {
                                 let pools_clone = Arc::clone(&pools);
-                                reconnect_in_background(connection, server_id, pools_clone).await;
-                                http::Response::new(504)
+                                reconnect_in_background(connection, server_id, pools_clone);
+                                http::Response::from_status(504)
                             }
                             _ => {
                                 warn!("Unwrapped error, server_id={server_id}, request_id={request_id}. {why}");
-                                http::Response::new(400)
+                                http::Response::from_status(400)
                             }
                         },
                     }
                 }
             }
         }
-        Err(e) => match e.kind() {
-            io::ErrorKind::TimedOut => {
-                warn!("Can't connect to server, connection timed out, server_id={server_id}, request_id={request_id}.");
-                http::Response::new(504)
-            }
-            _ => {
+        Err(e) => {
+            if e.kind() == io::ErrorKind::TimedOut {
+                warn!("Can't connect to server, connection timed out, server_id={server_id}, request_id={request_id}");
+                http::Response::from_status(504)
+            } else {
                 warn!(
                     "Can't connect to server, server_id={server_id}, request_id={request_id}. {e}"
                 );
-                http::Response::new(502)
+                http::Response::from_status(502)
             }
-        },
+        }
     };
 
     if let Err(e) = ekilibri_stream.write_all(&response.as_bytes()).await {
-        error!("Error sending response to client, request_id={request_id}, {e}")
+        error!("Error sending response to client, request_id={request_id}, error={e}");
     }
 
     counter.fetch_sub(1, Ordering::Relaxed);
 }
 
-async fn reconnect_in_background(
+fn reconnect_in_background(
     connection: Connection,
     server_id: usize,
     pools: Arc<RwLock<Vec<ConnectionPool>>>,
@@ -359,7 +358,7 @@ async fn process_request(
     config: Arc<Config>,
 ) -> Result<http::Response, ProcessingError> {
     match timeout(
-        Duration::from_millis(config.write_timeout as u64),
+        Duration::from_millis(config.write_timeout),
         server_stream.write_all(&request.as_bytes()),
     )
     .await
@@ -432,14 +431,14 @@ async fn choose_server_least_connections(
     Ok(chosen_server)
 }
 
-/// Checks if all the servers in the configuration([Config::servers]) are healthy.
-/// If a server times out or answers the health endpoint([Config::health_check_path])
+/// Checks if all the servers in the configuration([`Config::servers`]) are healthy.
+/// If a server times out or answers the health endpoint([`Config::health_check_path`])
 /// with something different than a 200, than the server is considered unhealthy
 /// and a timestamp is saved recording when the error happened. This data is used
-/// when considering to drop a server from the healthy servers list([HealthyServers]).
-/// This process considers the time window defined in the configuration([Config::fail_window])
+/// when considering to drop a server from the healthy servers list([`HealthyServers`]).
+/// This process considers the time window defined in the configuration([`Config::fail_window`])
 /// counting all errors recorded inside this time window. When the number of errors
-/// in this window is lesser than the configured Config::max_fails, the server is
+/// in this window is lesser than the configured `Config::max_fails`, the server is
 /// added to the list of healthy servers again.
 /// A background process runs cleaning the list of errors, retaining only the errors
 /// that happened inside the time window, this job runs every 10 seconds.
@@ -513,49 +512,45 @@ async fn check_servers_health(
                 continue;
             }
 
-            let mut stream = match timeout(
+            let mut stream = if let Ok(result) = timeout(
                 Duration::from_millis(config.connection_timeout),
                 TcpStream::connect(&server),
             )
             .await
             {
-                Ok(result) => match result {
+                match result {
                     Ok(stream) => stream,
                     Err(e) => {
                         warn!("Error while connecting to the server, {id} might be down, {e}",);
                         timeouts.read().await[id].write().await.push(Instant::now());
                         continue;
                     }
-                },
-                Err(_) => {
-                    warn!("Connection timeout, server {id} might be down",);
-                    timeouts.read().await[id].write().await.push(Instant::now());
-                    continue;
                 }
+            } else {
+                warn!("Connection timeout, server {id} might be down",);
+                timeouts.read().await[id].write().await.push(Instant::now());
+                continue;
             };
 
             let request = request_template.replace("[server]", server);
             // TODO: Timeout cancels the future, but write_all is
             // not cancellation safe. Will this be a problem?
-            match timeout(
-                Duration::from_millis(config.write_timeout as u64),
+            if let Ok(result) = timeout(
+                Duration::from_millis(config.write_timeout),
                 stream.write_all(request.as_bytes()),
             )
             .await
             {
-                Ok(result) => {
-                    if let Err(e) = result {
-                        warn!("Error sending request to server, {server} might be down, {e}");
-                        timeouts.read().await[id].write().await.push(Instant::now());
-                        continue;
-                    }
-                }
-                Err(_) => {
+                if let Err(e) = result {
+                    warn!("Error sending request to server, {server} might be down, {e}");
                     timeouts.read().await[id].write().await.push(Instant::now());
-                    warn!("Write timeout, server {server} might be down");
                     continue;
                 }
-            };
+            } else {
+                timeouts.read().await[id].write().await.push(Instant::now());
+                warn!("Write timeout, server {server} might be down");
+                continue;
+            }
             let response = match parse_response(&mut stream, config.read_timeout).await {
                 Ok(response) => response,
                 Err(e) => {
@@ -586,27 +581,27 @@ async fn check_servers_health(
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
 
-    async fn count_server_timeouts(
-        timeouts: &Arc<RwLock<Vec<RwLock<Vec<Instant>>>>>,
-        server_id: usize,
-        fail_window: u16,
-    ) -> u64 {
-        let timeouts = timeouts.read().await;
-        let server_timeouts = timeouts
-            .get(server_id)
-            .expect("The timeout list should be initialized with each server id")
-            .read()
-            .await;
+async fn count_server_timeouts(
+    timeouts: &Arc<RwLock<Vec<RwLock<Vec<Instant>>>>>,
+    server_id: usize,
+    fail_window: u16,
+) -> u64 {
+    let timeouts = timeouts.read().await;
+    let server_timeouts = timeouts
+        .get(server_id)
+        .expect("The timeout list should be initialized with each server id")
+        .read()
+        .await;
 
-        let mut counter = 0;
-        for timeout in server_timeouts.iter() {
-            if timeout.elapsed().as_secs() < fail_window as u64 {
-                counter += 1;
-            }
+    let mut counter = 0;
+    for timeout in server_timeouts.iter() {
+        if timeout.elapsed().as_secs() < fail_window as u64 {
+            counter += 1;
         }
-        counter
     }
+    counter
 }
 
 #[cfg(test)]
